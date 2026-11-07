@@ -252,6 +252,8 @@ fun SettingsScreen(
                     onStorageSizeChange = viewModel::setStorageSizeGb,
                     autostartOnBoot = autostartOnBoot,
                     onAutostartChange = viewModel::setAutostartOnBoot,
+                    overlayBubbleEnabled = ui.overlayBubbleEnabled,
+                    onOverlayBubbleChange = viewModel::setOverlayBubbleEnabled,
                 )
 
                 // ── NETWORK ───────────────────────────────────────────
@@ -505,6 +507,8 @@ private fun VmResourcesSection(
     onStorageSizeChange: (Int) -> Unit,
     autostartOnBoot: Boolean,
     onAutostartChange: (Boolean) -> Unit,
+    overlayBubbleEnabled: Boolean,
+    onOverlayBubbleChange: (Boolean) -> Unit,
 ) {
     PodroidSectionLabel(stringResource(R.string.vm_resources))
     if (!vmNotRunning) {
@@ -559,6 +563,28 @@ private fun VmResourcesSection(
     )
     Text(
         text = stringResource(R.string.autostart_on_boot_desc),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(
+            start = PodroidTokens.Spacing.MD,
+            end = PodroidTokens.Spacing.MD,
+            bottom = PodroidTokens.Spacing.SM,
+        ),
+    )
+    // Deliberately not gated on vmNotRunning: the whole point of this row is to
+    // be able to bring the floating ball back while the VM is already running.
+    PodroidListRow(
+        label = stringResource(R.string.overlay_bubble),
+        onClick = { onOverlayBubbleChange(!overlayBubbleEnabled) },
+        rightSlot = {
+            PodroidSwitch(
+                checked = overlayBubbleEnabled,
+                onCheckedChange = onOverlayBubbleChange,
+            )
+        },
+    )
+    Text(
+        text = stringResource(R.string.overlay_bubble_desc),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(

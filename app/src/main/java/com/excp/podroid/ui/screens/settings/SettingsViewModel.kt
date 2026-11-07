@@ -66,6 +66,7 @@ data class SettingsUiState(
     val systemDefaultLanguage: String = "auto",
     val loadBalanceEnabled: Boolean = false,
     val bandwidthMbps: Int = 0,
+    val overlayBubbleEnabled: Boolean = true,
 )
 
 // Typed intermediates for the three sub-combines below, so a reordered flow
@@ -135,7 +136,8 @@ class SettingsViewModel @Inject constructor(
         ) { bandwidth, engineSel, lang, sysLang ->
             LocaleRowsGroup(bandwidth, engineSel, lang, sysLang)
         },
-    ) { vm, misc, locale ->
+        settingsRepository.overlayBubbleEnabled,
+    ) { vm, misc, locale, overlayBubble ->
         SettingsUiState(
             vmRamMb = vm.vmRamMb,
             vmCpus = vm.vmCpus,
@@ -151,6 +153,7 @@ class SettingsViewModel @Inject constructor(
             systemDefaultLanguage = locale.systemDefaultLanguage,
             loadBalanceEnabled = vm.loadBalanceEnabled,
             bandwidthMbps = locale.bandwidthMbps,
+            overlayBubbleEnabled = overlayBubble,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SettingsUiState())
 
@@ -224,6 +227,10 @@ class SettingsViewModel @Inject constructor(
 
     fun setAutostartOnBoot(value: Boolean) {
         viewModelScope.launch { settingsRepository.setAutostartOnBoot(value) }
+    }
+
+    fun setOverlayBubbleEnabled(value: Boolean) {
+        viewModelScope.launch { settingsRepository.setOverlayBubbleEnabled(value) }
     }
 
     suspend fun setLanguage(value: String) {

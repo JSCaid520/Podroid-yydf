@@ -77,6 +77,12 @@ class SettingsRepository @Inject constructor(
         val KEY_BANDWIDTH_MBPS          = intPreferencesKey("bandwidth_mbps")
         /** Start the VM automatically on BOOT_COMPLETED. Read by VmControlReceiver. */
         val KEY_AUTOSTART_ON_BOOT       = booleanPreferencesKey("autostart_on_boot")
+        /**
+         * Always-on-top status bubble. Off means the overlay window is never
+         * added, which is also the switch the bubble's own "hide" action flips -
+         * that way a hidden ball has a discoverable way back (Settings).
+         */
+        val KEY_OVERLAY_BUBBLE_ENABLED  = booleanPreferencesKey("overlay_bubble_enabled")
 
         val KEY_X11_RES_MODE        = stringPreferencesKey("x11_resolution_mode")
         val KEY_X11_RES_PRESET      = stringPreferencesKey("x11_resolution_preset")
@@ -159,6 +165,7 @@ class SettingsRepository @Inject constructor(
     val loadBalanceEnabled    = pref(KEY_LOAD_BALANCE_ENABLED, false)
     val bandwidthMbps         = pref(KEY_BANDWIDTH_MBPS, 0)
     val autostartOnBoot       = pref(KEY_AUTOSTART_ON_BOOT, false)
+    val overlayBubbleEnabled  = pref(KEY_OVERLAY_BUBBLE_ENABLED, true)
     val avfVerboseLogging: Flow<Boolean> = context.dataStore.data
         .catch { e -> if (e is IOException) emit(androidx.datastore.preferences.core.emptyPreferences()) else throw e }
         .map { prefs -> prefs[KEY_AVF_VERBOSE_LOGGING] ?: false }
@@ -208,6 +215,7 @@ class SettingsRepository @Inject constructor(
     suspend fun setLoadBalanceEnabled(value: Boolean)    = set(KEY_LOAD_BALANCE_ENABLED, value)
     suspend fun setBandwidthMbps(value: Int)             = set(KEY_BANDWIDTH_MBPS, value.coerceAtLeast(0))
     suspend fun setAutostartOnBoot(value: Boolean)       = set(KEY_AUTOSTART_ON_BOOT, value)
+    suspend fun setOverlayBubbleEnabled(value: Boolean)  = set(KEY_OVERLAY_BUBBLE_ENABLED, value)
 
     /**
      * Persists all first-run setup choices in a single transaction so a process

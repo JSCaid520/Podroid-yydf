@@ -80,6 +80,8 @@
     <string name="storage">存储</string>
     <string name="autostart_on_boot">开机时启动虚拟机</string>
     <string name="autostart_on_boot_desc">手机启动后自动开启虚拟机。自动化应用也可以通过 com.excp.podroid.action.START_VM 和 STOP_VM 意图操作触发。</string>
+    <string name="overlay_bubble">悬浮球</string>
+    <string name="overlay_bubble_desc">虚拟运行时贴着屏幕边缘显示的状态圆点。若在圆点菜单里点了「隐藏圆点」，到这里打开即可恢复，不用重启。</string>
     <string name="reset_vm">重置虚拟机（删除所有数据）</string>
     <string name="reset_vm_description">完全重置应用？</string>
     <string name="reset_vm_text">这将清除所有应用数据，包括虚拟机存储、设置和端口规则。应用将关闭并恢复到刚安装时的状态。</string>

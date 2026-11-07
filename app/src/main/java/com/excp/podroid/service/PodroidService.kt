@@ -116,8 +116,12 @@ class PodroidService : Service() {
     /** Persisted rule count, mirrored for the bubble's status line. */
     @Volatile private var forwardCount = 0
 
-    /** Set by the bubble's "hide" action; reset when a new session starts. */
-    private var overlayHiddenThisSession = false
+    /**
+     * Mirror of SettingsRepository.overlayBubbleEnabled, so the state collectors
+     * can decide synchronously without suspending. Both the bubble's own "hide"
+     * action and the Settings switch write that pref - this field only follows it.
+     */
+    @Volatile private var overlayEnabled = true
 
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -125,10 +129,21 @@ class PodroidService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        // A fresh service instance = a fresh VM session, so a bubble hidden via
-        // its own menu comes back. (Auto-restarts reuse this instance and keep it
-        // hidden - they are the same session.)
-        overlayHiddenThisSession = false
+        // One pref serves two entry points: the panel's "hide" action sets it to
+        // false, the Settings switch sets it back to true. Watching it here keeps
+        // both honest - hiding removes the window at once, re-enabling brings it
+        // straight back while the VM is up instead of waiting for the next start.
+        serviceScope.launch {
+            settingsRepository.overlayBubbleEnabled.collect { enabled ->
+                val was = overlayEnabled
+                overlayEnabled = enabled
+                if (!enabled) {
+                    hideOverlay()
+                } else if (!was && bubbleWantedByState()) {
+                    ensureOverlay()?.refresh()
+                }
+            }
+        }
         userStopRequested = false
     }
 
@@ -415,10 +430,10 @@ class PodroidService : Service() {
                     // Timestamped so the next unexpected exit can tell a healthy
                     // long run (budget refilled) from a boot-loop (kept depleted).
                     lastBootAtMs = System.currentTimeMillis()
-                    if (!overlayHiddenThisSession) ensureOverlay()?.refresh()
+                    if (overlayEnabled) ensureOverlay()?.refresh()
                 }
                 is VmState.Starting -> {
-                    if (!overlayHiddenThisSession) ensureOverlay()?.refresh()
+                    if (overlayEnabled) ensureOverlay()?.refresh()
                 }
                 else -> {
                     // Idle/Stopped/Error: nothing to show over.
@@ -430,6 +445,11 @@ class PodroidService : Service() {
 
     private fun ensureOverlay(): OverlayBubble? {
         overlayBubble?.let { if (it.isShowing()) return it }
+        if (!overlayEnabled) {
+            // Switched off in Settings (or hidden from the bubble's own menu).
+            Log.i(TAG, "status bubble disabled; not showing it")
+            return null
+        }
         if (!Settings.canDrawOverlays(this)) {
             Log.w(TAG, "SYSTEM_ALERT_WINDOW not granted; no status bubble this session")
             return null
@@ -448,7 +468,10 @@ class PodroidService : Service() {
             onToggleVm = { handleOverlayToggle() },
             onRestartForwards = { restartAllForwards() },
             onHide = {
-                overlayHiddenThisSession = true
+                // Persist it. The Settings switch is the documented way back, and
+                // a session-only flag would resurrect the ball on the next VM
+                // start anyway - which is the opposite of what "hidden" means.
+                serviceScope.launch { settingsRepository.setOverlayBubbleEnabled(false) }
                 hideOverlay()
             },
         )
@@ -459,6 +482,12 @@ class PodroidService : Service() {
     private fun hideOverlay() {
         overlayBubble?.hide()
         overlayBubble = null
+    }
+
+    /** True while the VM is up or coming up - the only states that show a bubble. */
+    private fun bubbleWantedByState(): Boolean = when (engine.state.value) {
+        is VmState.Running, is VmState.Starting -> true
+        else -> false
     }
 
     private fun buildOverlayStatus(): String =

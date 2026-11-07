@@ -9,7 +9,9 @@
  * as visible, so the VM keeps running after the user leaves the app).
  *
  * Interaction: tap the ball to expand a five-action panel, tap again to collapse.
- * Drag it anywhere; on release it snaps to the nearer screen edge.
+ * Drag it anywhere; on release it snaps to the nearer screen edge, and it starts
+ * out docked to the right edge (a little above the middle) so it never sits in
+ * the way of the content underneath.
  */
 package com.excp.podroid.service
 
@@ -38,7 +40,7 @@ import kotlin.math.roundToInt
  * @param onOpenApp open the app itself.
  * @param onToggleVm start the VM when it is idle, stop it when it is up.
  * @param onRestartForwards replay every port-forward rule over QMP.
- * @param onHide hide the bubble for the rest of this VM session.
+ * @param onHide hide the bubble until it is switched back on in Settings.
  */
 class OverlayBubble(
     private val context: Context,
@@ -51,6 +53,12 @@ class OverlayBubble(
     private companion object {
         const val TAG = "PodroidOverlay"
         const val BALL_DP = 44
+
+        /** Gap between the ball and the panel when both are laid out. */
+        const val BALL_MARGIN_DP = 6
+
+        /** Where the ball starts vertically: 40% down the screen. */
+        const val DOCK_Y_FRACTION = 0.40f
 
         const val ROW_BG = 0x33FFFFFF
 
@@ -71,8 +79,15 @@ class OverlayBubble(
     private var params: WindowManager.LayoutParams? = null
     private var root: LinearLayout? = null
     private var panel: LinearLayout? = null
+    private var ball: TextView? = null
     private var status: TextView? = null
     private var expanded = false
+
+    /**
+     * Which edge the ball is glued to. The panel is always laid out on the
+     * opposite side, otherwise it would cover the ball it belongs to.
+     */
+    private var dockedLeft = false
 
     fun isShowing(): Boolean = root != null
 
@@ -99,13 +114,21 @@ class OverlayBubble(
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = (metrics.widthPixels - dp(BALL_DP + 10)).coerceAtLeast(0)
-            y = (metrics.heightPixels / 2).coerceAtLeast(0)
+            // Start docked on the RIGHT edge, a little above the vertical middle:
+            // out of the way of centred content, and the panel - which opens
+            // leftwards from there - has the whole screen width to expand into.
+            // The exact x is recomputed from the measured width in dockToEdge()
+            // once layout has run, so this is only the first-frame approximation.
+            dockedLeft = false
+            x = (metrics.widthPixels - dp(BALL_DP + BALL_MARGIN_DP)).coerceAtLeast(0)
+            y = (metrics.heightPixels * DOCK_Y_FRACTION).roundToInt()
+                .coerceIn(0, (metrics.heightPixels - dp(BALL_DP)).coerceAtLeast(0))
         }
         return try {
             windowManager.addView(view, windowParams)
             root = view
             params = windowParams
+            dockToEdge()
             true
         } catch (e: Throwable) {
             // OEMs can refuse even with the grant (e.g. the permission was just
@@ -122,6 +145,7 @@ class OverlayBubble(
             .onFailure { Log.w(TAG, "could not remove the overlay view", it) }
         root = null
         panel = null
+        ball = null
         status = null
         params = null
         expanded = false
@@ -152,10 +176,20 @@ class OverlayBubble(
         panelView.addView(actionRow("启动 / 停止") { collapse(); onToggleVm() })
         panelView.addView(actionRow("重播全部转发") { collapse(); onRestartForwards() })
         panelView.addView(actionRow("复制状态") { copyStatus() })
-        panelView.addView(actionRow("隐藏圆点") { collapse(); onHide() })
+        // The hint matters: hiding used to be a one-way door for the rest of the
+        // session with no visible way back, so tell the user where the switch is.
+        panelView.addView(actionRow("隐藏圆点") {
+            collapse()
+            Toast.makeText(
+                context,
+                "已隐藏悬浮球，可在「Podroid 设置 → 悬浮球」重新打开",
+                Toast.LENGTH_LONG,
+            ).show()
+            onHide()
+        })
         panel = panelView
 
-        val ball = TextView(context).apply {
+        val ballView = TextView(context).apply {
             text = "●"
             textSize = 15f
             gravity = Gravity.CENTER
@@ -165,14 +199,17 @@ class OverlayBubble(
             isClickable = true
             setOnTouchListener(dragAndTap())
         }
+        ball = ballView
 
         return LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            // Panel first: docked on the right edge (the default) it opens leftwards.
+            // Panel first: docked on the right edge (the default) it opens
+            // leftwards. orderPanelForDock() flips the two when the ball has
+            // been dragged to the left edge.
             addView(panelView)
-            addView(ball, LinearLayout.LayoutParams(dp(BALL_DP), dp(BALL_DP)).apply {
-                marginStart = dp(6)
+            addView(ballView, LinearLayout.LayoutParams(dp(BALL_DP), dp(BALL_DP)).apply {
+                marginStart = dp(BALL_MARGIN_DP)
             })
         }
     }
@@ -239,29 +276,64 @@ class OverlayBubble(
     private fun togglePanel() {
         val panelView = panel ?: return
         expanded = !expanded
-        if (expanded) status?.text = statusLine()
+        if (expanded) {
+            status?.text = statusLine()
+            orderPanelForDock()
+        }
         panelView.visibility = if (expanded) View.VISIBLE else View.GONE
-        clampToScreen()
+        // Opening widens the window and closing narrows it again, so the x that
+        // was right a moment ago no longer is. Re-anchor rather than merely
+        // clamping: clamping kept the expanded x after the panel closed, which
+        // left the ball stranded near the middle of the screen instead of
+        // hugging the edge it had been docked to.
+        dockToEdge()
     }
 
     private fun collapse() {
         if (!expanded) return
         expanded = false
         panel?.visibility = View.GONE
-        clampToScreen()
+        dockToEdge()
     }
 
     /**
-     * Bring the window back inside the screen after a size change (expanding the
-     * panel makes it wider/taller, which can push it off-screen when docked).
-     * Posting is required: layout has not run yet when visibility flips.
+     * Puts the panel on the side away from the docked edge so it never covers
+     * the ball. Child order matters: the window grows to the right of its x, so
+     * a right-docked ball has to be the last child, a left-docked one the first.
      */
-    private fun clampToScreen() {
+    private fun orderPanelForDock() {
+        val container = root ?: return
+        val panelView = panel ?: return
+        val ballView = ball ?: return
+        val ballIsFirst = container.getChildAt(0) === ballView
+        if (ballIsFirst == dockedLeft) return
+        container.removeAllViews()
+        if (dockedLeft) {
+            container.addView(ballView, ballLayoutParams(0))
+            container.addView(panelView)
+        } else {
+            container.addView(panelView)
+            container.addView(ballView, ballLayoutParams(dp(BALL_MARGIN_DP)))
+        }
+    }
+
+    private fun ballLayoutParams(marginStartPx: Int) =
+        LinearLayout.LayoutParams(dp(BALL_DP), dp(BALL_DP)).apply {
+            marginStart = marginStartPx
+        }
+
+    /**
+     * Glues the window to the docked edge. Posting is required: the view has not
+     * been re-measured when the panel's visibility flips, so the width used here
+     * must be the one it is about to have, not the stale one.
+     */
+    private fun dockToEdge() {
         val view = root ?: return
         view.post {
             val p = params ?: return@post
             val metrics = context.resources.displayMetrics
-            p.x = p.x.coerceIn(0, (metrics.widthPixels - view.width).coerceAtLeast(0))
+            val width = if (view.width > 0) view.width else dp(BALL_DP + BALL_MARGIN_DP)
+            p.x = if (dockedLeft) 0 else (metrics.widthPixels - width).coerceAtLeast(0)
             p.y = p.y.coerceIn(0, (metrics.heightPixels - view.height).coerceAtLeast(0))
             runCatching { windowManager.updateViewLayout(view, p) }
         }
@@ -272,8 +344,9 @@ class OverlayBubble(
         view.post {
             val p = params ?: return@post
             val metrics = context.resources.displayMetrics
-            val maxX = (metrics.widthPixels - view.width).coerceAtLeast(0)
-            p.x = if (p.x + view.width / 2 < metrics.widthPixels / 2) 0 else maxX
+            val width = if (view.width > 0) view.width else dp(BALL_DP + BALL_MARGIN_DP)
+            dockedLeft = p.x + width / 2 < metrics.widthPixels / 2
+            p.x = if (dockedLeft) 0 else (metrics.widthPixels - width).coerceAtLeast(0)
             p.y = p.y.coerceIn(0, (metrics.heightPixels - view.height).coerceAtLeast(0))
             runCatching { windowManager.updateViewLayout(view, p) }
         }
