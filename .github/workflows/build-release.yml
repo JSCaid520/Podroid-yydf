@@ -139,8 +139,15 @@ jobs:
           OUT="Podroid-${{ steps.ver.outputs.tag }}-release.apk"
           cp "$SRC" "/tmp/$OUT"
           # The signature must be ours, not a debug fallback: a debug-signed
-          # "release" would fail to install over the previous build.
-          "$ANDROID_HOME"/build-tools/*/apksigner verify --print-certs "/tmp/$OUT" | head -5
+          # "release" would fail to install over the previous build. Pick one
+          # apksigner explicitly - the runner ships build-tools 35 while the
+          # build pulls 36, and an unquoted glob then feeds one binary to the
+          # other ("Unsupported command: ...").
+          APKSIGNER=$(ls -1d "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
+          echo "apksigner: $APKSIGNER"
+          CERTS=$("$APKSIGNER" verify --print-certs "/tmp/$OUT")
+          echo "$CERTS" | head -6
+          echo "$CERTS" | grep -q "CN=Podroid" || { echo "APK is not signed with the Podroid release key"; exit 1; }
           echo "size=$(stat -c %s "/tmp/$OUT")" >> "$GITHUB_OUTPUT"
           echo "sha256=$(sha256sum "/tmp/$OUT" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "file=/tmp/$OUT" >> "$GITHUB_OUTPUT"
