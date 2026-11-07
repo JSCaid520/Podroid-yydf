@@ -79,3 +79,6 @@ app/src/main/jniLibs/
 
 # Visual companion (brainstorming sessions)
 .superpowers/
+
+# Local edit backups must never be committed (a .bak under res/ breaks aapt).
+*.bak_*
