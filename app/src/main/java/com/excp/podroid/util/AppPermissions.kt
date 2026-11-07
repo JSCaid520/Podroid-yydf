@@ -48,6 +48,12 @@ enum class AppPermission(
         R.string.perm_battery_why,
         Build.VERSION_CODES.M,
     ),
+    OVERLAY(
+        null,
+        R.string.perm_overlay_title,
+        R.string.perm_overlay_why,
+        Build.VERSION_CODES.O,
+    ),
 }
 
 /**
@@ -80,6 +86,7 @@ fun AppPermission.isGranted(context: Context): Boolean =
             val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
             powerManager.isIgnoringBatteryOptimizations(context.packageName)
         }
+        AppPermission.OVERLAY -> Settings.canDrawOverlays(context)
     }
 
 /** Applicable permissions on this device that are not currently granted, in order. */
@@ -106,6 +113,32 @@ fun AppPermissions.requestBatteryOptimizationExemption(context: Context) {
             context.startActivity(listIntent)
         } catch (e2: ActivityNotFoundException) {
             Log.e(TAG, "No battery-optimization settings screen available on this device", e2)
+        }
+    }
+}
+
+/**
+ * Opens the system screen that grants "display over other apps". Unlike a runtime
+ * permission there is no request dialog: the toggle lives in Settings, so this
+ * just deep-links to this package's entry (falling back to the global list when
+ * an OEM strips the per-package screen).
+ */
+fun AppPermissions.requestOverlayPermission(context: Context) {
+    val packageIntent = Intent(
+        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+        Uri.parse("package:${context.packageName}"),
+    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    try {
+        context.startActivity(packageIntent)
+    } catch (e: ActivityNotFoundException) {
+        Log.w(TAG, "Per-package overlay screen unavailable, opening the global list", e)
+        try {
+            context.startActivity(
+                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        } catch (e2: ActivityNotFoundException) {
+            Log.e(TAG, "No overlay-permission settings screen available on this device", e2)
         }
     }
 }

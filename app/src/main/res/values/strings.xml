@@ -245,6 +245,8 @@
     <string name="perm_notifications_why">Shows the VM\'s state and lets you stop it from the notification shade.</string>
     <string name="perm_battery_title">Unrestricted background</string>
     <string name="perm_battery_why">Keeps the VM running when the app is in the background.</string>
+    <string name="perm_overlay_title">Floating status bubble</string>
+    <string name="perm_overlay_why">A small always-on-top bubble that keeps the VM counted as in-use while Podroid is in the background, with quick start/stop and port-forward replay.</string>
     <string name="perm_grant">Grant</string>
     <string name="perm_granted">Granted</string>
 

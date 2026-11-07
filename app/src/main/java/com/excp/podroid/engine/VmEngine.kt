@@ -93,6 +93,17 @@ interface VmEngine {
     suspend fun removePortForward(rule: PortForwardRule)
 
     /**
+     * Re-issue every forward this backend believes is live, as remove-then-add
+     * over the live control channel (QMP for QEMU). Used by the status bubble's
+     * "replay forwards" action when a host-side listener died while the VM kept
+     * running - QEMU re-binds it without a reboot.
+     *
+     * Returns how many rules were replayed; 0 means "nothing known to replay"
+     * (no VM started this cycle) rather than success.
+     */
+    suspend fun replayPortForwards(): Int = 0
+
+    /**
      * Of the rules handed to [start], the ones this backend has actually applied
      * by the time the VM reaches Running. Everything else must be pushed in
      * afterwards through [addPortForward].

@@ -22,7 +22,9 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -108,16 +110,38 @@ class PodroidService : Service() {
 
     private var notificationBuilder: NotificationCompat.Builder? = null
 
+    /** Always-on-top status bubble; only alive while the VM is up. */
+    private var overlayBubble: OverlayBubble? = null
+
+    /** Persisted rule count, mirrored for the bubble's status line. */
+    @Volatile private var forwardCount = 0
+
+    /** Set by the bubble's "hide" action; reset when a new session starts. */
+    private var overlayHiddenThisSession = false
+
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        // A fresh service instance = a fresh VM session, so a bubble hidden via
+        // its own menu comes back. (Auto-restarts reuse this instance and keep it
+        // hidden - they are the same session.)
+        overlayHiddenThisSession = false
+        userStopRequested = false
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
+                userStopRequested = false
+                // A start the user (or an automation intent) asked for deserves a
+                // fresh budget; a start we scheduled ourselves must keep counting,
+                // otherwise a boot-loop would reload the budget on every retry.
+                if (!pendingAutoRestart) autoRestartAttempts = 0
+                pendingAutoRestart = false
+                restartInFlight = false
                 // Android 14+ (API 34) requires the foregroundServiceType argument
                 // when the manifest declares foregroundServiceType="specialUse";
                 // otherwise Android throws MissingForegroundServiceTypeException.
@@ -158,6 +182,12 @@ class PodroidService : Service() {
                 }
             }
             ACTION_STOP -> {
+                userStopRequested = true
+                // A restart may be in flight (guest "restart", auto-restart). The
+                // explicit Stop wins: clear the marker so the shutdown observer
+                // stops ignoring terminals and the poller aborts (see
+                // scheduleRestart).
+                restartInFlight = false
                 val wasActive = engine.state.value is VmState.Starting ||
                     engine.state.value is VmState.Running
                 engine.stop()
@@ -191,6 +221,7 @@ class PodroidService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        hideOverlay()
         notificationJob?.cancel()
         hostRequestServer?.stop()
         usbPassthroughManager.stop()
@@ -200,14 +231,13 @@ class PodroidService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        // App swiped from recents — stop the VM gracefully and tear the service
-        // down unconditionally. engine.stop() is a no-op if idle; doing this even
-        // in the Idle-before-Starting window prevents a swipe during early start
-        // from leaving a VM that starts with no UI, holding the WakeLock.
-        engine.stop()
-        releaseWakeLock()
-        stopForegroundCompat()
-        stopSelf()
+        // Swiping Podroid out of recents must NOT stop the VM: this is a headless
+        // server, and the whole point of the foreground service is to keep
+        // containers reachable while the UI is gone. The VM is stopped only by an
+        // explicit Stop (notification action, bubble, automation intent), and the
+        // overlay bubble keeps the process counted as in-use after the swipe.
+        Log.d(TAG, "task removed; keeping the VM and the foreground service alive")
+        overlayBubble?.refresh()
     }
 
     private fun acquireWakeLock() {
@@ -239,6 +269,13 @@ class PodroidService : Service() {
         notificationJob = serviceScope.launch {
             launch { observeStateForNotification() }
             launch { observeStateForShutdown() }
+            launch { observeStateForOverlay() }
+            launch {
+                portForwardRepository.rules.collect { rules ->
+                    forwardCount = rules.size
+                    overlayBubble?.refresh()
+                }
+            }
         }
     }
 
@@ -290,7 +327,47 @@ class PodroidService : Service() {
                     if (!seenActive) return@collect
                     teardown()
                 }
-                is VmState.Stopped, is VmState.Error -> teardown()
+                is VmState.Stopped, is VmState.Error -> {
+                    if (restartInFlight) {
+                        // The stop this terminal state came from is our own
+                        // restart; the replacement start is already scheduled.
+                        Log.d(TAG, "terminal state during a scheduled restart; ignoring")
+                        return@collect
+                    }
+                    // Unexpected exit (crash, OOM-killed QEMU, guest panic) while
+                    // the user never asked to stop: put the VM back up instead of
+                    // letting the server silently die. Bounded, so a VM that
+                    // cannot boot (missing binary, bad config) still ends in a
+                    // clean teardown with the error notification visible.
+                    val uptimeMs = if (lastBootAtMs > 0) {
+                        System.currentTimeMillis() - lastBootAtMs
+                    } else {
+                        0L
+                    }
+                    if (uptimeMs >= STEADY_UPTIME_MS) {
+                        // It ran fine for minutes before dying, so treat this as a
+                        // one-off and refill the budget.
+                        autoRestartAttempts = 0
+                    }
+                    val unexpected = seenActive && !userStopRequested
+                    if (unexpected && autoRestartAttempts < MAX_AUTO_RESTARTS) {
+                        autoRestartAttempts++
+                        pendingAutoRestart = true
+                        Log.w(
+                            TAG,
+                            "VM exited unexpectedly (state=$state, uptime=${uptimeMs}ms); " +
+                                "auto-restart $autoRestartAttempts/$MAX_AUTO_RESTARTS",
+                        )
+                        updateNotification(
+                            "VM exited - restarting ($autoRestartAttempts/$MAX_AUTO_RESTARTS)",
+                        )
+                        scheduleRestart()
+                    } else {
+                        autoRestartAttempts = 0
+                        pendingAutoRestart = false
+                        teardown()
+                    }
+                }
             }
         }
     }
@@ -324,6 +401,113 @@ class PodroidService : Service() {
                 else -> {}
             }
         }
+    }
+
+    /**
+     * Keeps the status bubble in step with the VM: shown from the first sign of
+     * life (so a slow boot can be watched and stopped) and removed once the VM
+     * is gone. Also arms the auto-restart budget reset.
+     */
+    private suspend fun observeStateForOverlay() {
+        engine.state.collect { state ->
+            when (state) {
+                is VmState.Running -> {
+                    // Timestamped so the next unexpected exit can tell a healthy
+                    // long run (budget refilled) from a boot-loop (kept depleted).
+                    lastBootAtMs = System.currentTimeMillis()
+                    if (!overlayHiddenThisSession) ensureOverlay()?.refresh()
+                }
+                is VmState.Starting -> {
+                    if (!overlayHiddenThisSession) ensureOverlay()?.refresh()
+                }
+                else -> {
+                    // Idle/Stopped/Error: nothing to show over.
+                    hideOverlay()
+                }
+            }
+        }
+    }
+
+    private fun ensureOverlay(): OverlayBubble? {
+        overlayBubble?.let { if (it.isShowing()) return it }
+        if (!Settings.canDrawOverlays(this)) {
+            Log.w(TAG, "SYSTEM_ALERT_WINDOW not granted; no status bubble this session")
+            return null
+        }
+        val bubble = OverlayBubble(
+            context = this,
+            statusLine = { buildOverlayStatus() },
+            onOpenApp = {
+                runCatching {
+                    startActivity(
+                        Intent(this, MainActivity::class.java)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                }.onFailure { Log.w(TAG, "could not open the app from the bubble", it) }
+            },
+            onToggleVm = { handleOverlayToggle() },
+            onRestartForwards = { restartAllForwards() },
+            onHide = {
+                overlayHiddenThisSession = true
+                hideOverlay()
+            },
+        )
+        overlayBubble = if (bubble.show()) bubble else null
+        return overlayBubble
+    }
+
+    private fun hideOverlay() {
+        overlayBubble?.hide()
+        overlayBubble = null
+    }
+
+    private fun buildOverlayStatus(): String =
+        "${stateLabel(engine.state.value)} · 转发 $forwardCount 条"
+
+    private fun stateLabel(state: VmState): String = when (state) {
+        is VmState.Running -> "VM 运行中"
+        is VmState.Starting -> "VM 启动中"
+        is VmState.Stopped -> "VM 已停止"
+        is VmState.Error -> "VM 出错"
+        is VmState.Idle -> "VM 未启动"
+    }
+
+    private fun handleOverlayToggle() {
+        val active = engine.state.value is VmState.Running ||
+            engine.state.value is VmState.Starting
+        if (active) {
+            userStopRequested = true
+            PodroidService.stop(this)
+        } else {
+            userStopRequested = false
+            PodroidService.start(this)
+        }
+    }
+
+    /**
+     * Re-issues every live forward (persisted user rules plus the implicit
+     * SSH/VNC/audio ones) as remove-then-add over QMP. Used when a forward's
+     * host-side socket died - port taken, QMP hiccup - without touching the VM:
+     * QEMU re-binds the listener without a reboot.
+     */
+    private fun restartAllForwards() {
+        serviceScope.launch {
+            if (engine.state.value !is VmState.Running) {
+                toastMessage("虚拟机未运行，无法重播转发")
+                return@launch
+            }
+            val replayed = runCatching { engine.replayPortForwards() }
+                .onFailure { Log.w(TAG, "forward replay failed", it) }
+                .getOrDefault(0)
+            toastMessage(
+                if (replayed > 0) "已重播 $replayed 条转发" else "没有可重播的转发"
+            )
+            overlayBubble?.refresh()
+        }
+    }
+
+    private fun toastMessage(text: String) {
+        runCatching { Toast.makeText(applicationContext, text, Toast.LENGTH_SHORT).show() }
     }
 
     private fun ensureHostBridge(): com.excp.podroid.engine.hostbridge.HostRequestServer {
@@ -550,6 +734,9 @@ class PodroidService : Service() {
     }
 
     private fun scheduleRestart() {
+        // Marked before the delay so any terminal emission produced in the next
+        // 300ms is recognized as "this restart", not a second crash.
+        restartInFlight = true
         val ctx = applicationContext
         val eng = engine
         val main = android.os.Handler(android.os.Looper.getMainLooper())
@@ -564,7 +751,26 @@ class PodroidService : Service() {
                     // it as terminal could fire start() during a teardown blip.
                     val terminal = s is VmState.Stopped || s is VmState.Error
                     when {
-                        terminal -> runIgnoringBackgroundFgsDenial(TAG) { PodroidService.start(ctx) }
+                        terminal -> {
+                            if (userStopRequested) {
+                                // The user pressed Stop while we were waiting for
+                                // the old VM to die: their stop wins.
+                                restartInFlight = false
+                                return
+                            }
+                            var started = false
+                            runIgnoringBackgroundFgsDenial(TAG) {
+                                PodroidService.start(ctx)
+                                started = true
+                            }
+                            if (!started) {
+                                // Denied (background FGS restriction, app force-
+                                // stopped): clear the marker so the next crash is
+                                // evaluated instead of silently ignored forever.
+                                Log.w(TAG, "restart denied by the system; VM stays stopped")
+                                restartInFlight = false
+                            }
+                        }
                         tries++ >= 40 -> {
                             Log.w(TAG, "restart: VM did not reach a stopped state in time (state=$s); starting anyway")
                             runIgnoringBackgroundFgsDenial(TAG) { PodroidService.start(ctx) }
@@ -581,6 +787,32 @@ class PodroidService : Service() {
         private const val TAG = "PodroidService"
         private const val CHANNEL_ID = "podroid_service"
         private const val NOTIFICATION_ID = 1001
+
+        /** Consecutive unexpected-exit restarts before giving up and tearing down. */
+        private const val MAX_AUTO_RESTARTS = 3
+
+        /** Uptime after which the auto-restart budget is considered healthy again. */
+        private const val STEADY_UPTIME_MS = 5 * 60 * 1000L
+
+        // Restart bookkeeping is deliberately process-wide, not per-instance: an
+        // auto-restart goes stop -> stopSelf -> start, which builds a NEW service
+        // instance. Instance fields would reset the budget on every retry and let
+        // a boot-loop (bad config, missing binary) spin forever.
+        @Volatile private var autoRestartAttempts = 0
+        @Volatile private var lastBootAtMs = 0L
+        @Volatile private var pendingAutoRestart = false
+
+        /**
+         * True only when the user (or an automation intent) asked for a stop. The
+         * shutdown observer uses it to tell "the VM died on its own" (restart it)
+         * from "the user wanted it stopped" (tear down for good). Process-wide for
+         * the same reason as the budget: a stop can land while a restart is being
+         * polled by a service instance that is already dying.
+         */
+        @Volatile private var userStopRequested = false
+
+        /** True from scheduleRestart() until the replacement start() arrives. */
+        @Volatile private var restartInFlight = false
 
         const val ACTION_START   = "com.excp.podroid.action.START"
         const val ACTION_STOP    = "com.excp.podroid.action.STOP"

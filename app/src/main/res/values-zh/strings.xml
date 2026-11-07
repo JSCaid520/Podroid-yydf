@@ -245,6 +245,8 @@
     <string name="perm_notifications_why">显示虚拟机状态，并可从通知栏停止虚拟机。</string>
     <string name="perm_battery_title">后台不受限制</string>
     <string name="perm_battery_why">让虚拟机在应用退到后台时继续运行。</string>
+    <string name="perm_overlay_title">悬浮状态球</string>
+    <string name="perm_overlay_why">一个常驻的小悬浮球，让虚拟机退到后台时仍被视为正在使用，并可一键启动/停止、重放端口转发。</string>
     <string name="perm_grant">授权</string>
     <string name="perm_granted">已授权</string>
 

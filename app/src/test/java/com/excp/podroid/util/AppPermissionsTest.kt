@@ -19,9 +19,14 @@ class AppPermissionsTest {
     @Test
     fun missing_returnsAllApplicableInDeclarationOrder_whenNoneGranted() {
         assertEquals(
-            listOf(AppPermission.NOTIFICATIONS, AppPermission.BATTERY_OPTIMIZATION),
+            listOf(AppPermission.NOTIFICATIONS, AppPermission.BATTERY_OPTIMIZATION, AppPermission.OVERLAY),
             AppPermissions.missing(33) { false },
         )
+    }
+
+    @Test
+    fun applicable_includesOverlayFromOreo() {
+        assertEquals(true, AppPermissions.applicable(26).contains(AppPermission.OVERLAY))
     }
 
     @Test
@@ -32,7 +37,7 @@ class AppPermissionsTest {
     @Test
     fun missing_excludesOnlyTheGrantedOnes() {
         assertEquals(
-            listOf(AppPermission.BATTERY_OPTIMIZATION),
+            listOf(AppPermission.BATTERY_OPTIMIZATION, AppPermission.OVERLAY),
             AppPermissions.missing(33) { it == AppPermission.NOTIFICATIONS },
         )
     }

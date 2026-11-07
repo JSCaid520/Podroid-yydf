@@ -149,6 +149,7 @@ fun HomeScreen(
         when (permission) {
             AppPermission.NOTIFICATIONS -> notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             AppPermission.BATTERY_OPTIMIZATION -> AppPermissions.requestBatteryOptimizationExemption(context)
+            AppPermission.OVERLAY -> AppPermissions.requestOverlayPermission(context)
         }
     }
 

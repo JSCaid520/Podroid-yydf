@@ -447,6 +447,40 @@ class EngineHolder @Inject constructor(
         current.createTerminalSession(client)
     override suspend fun addPortForward(rule: PortForwardRule) = current.addPortForward(rule)
     override suspend fun removePortForward(rule: PortForwardRule) = current.removePortForward(rule)
+
+    /**
+     * Replays the union of [launchRules] and [appliedRules]: the launch set holds
+     * the implicit always-on forwards that never reach the DataStore (SSH 9922,
+     * VNC 5900, audio 4713), [appliedRules] the persisted user rules currently
+     * live. Either can be ahead of the other mid-diff, so both are replayed.
+     *
+     * This does not touch the diff loop's bookkeeping: the same rule set stays
+     * live, so the next DataStore emission still computes an empty diff. A remove
+     * for a rule the backend never applied fails harmlessly and is logged.
+     */
+    override suspend fun replayPortForwards(): Int {
+        val eng = current
+        val rules = (launchRules + appliedRules)
+            .sortedWith(compareBy({ it.hostPort }, { it.protocol }))
+        if (rules.isEmpty()) return 0
+        for (r in rules) {
+            try {
+                eng.removePortForward(r)
+            } catch (c: CancellationException) {
+                throw c
+            } catch (e: Exception) {
+                android.util.Log.w(TAG, "replay: removePortForward failed for $r", e)
+            }
+            try {
+                eng.addPortForward(r)
+            } catch (c: CancellationException) {
+                throw c
+            } catch (e: Exception) {
+                android.util.Log.w(TAG, "replay: addPortForward failed for $r", e)
+            }
+        }
+        return rules.size
+    }
     override fun openHostTransport(): com.excp.podroid.engine.hostbridge.HostTransport? =
         current.openHostTransport()
     override fun diagnosticsReport(): String = current.diagnosticsReport()
