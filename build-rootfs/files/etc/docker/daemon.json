@@ -1,0 +1,7 @@
+{
+  "registry-mirrors": [
+    "https://docker.1ms.run",
+    "https://hub.rat.dev",
+    "https://docker.m.daocloud.io"
+  ]
+}

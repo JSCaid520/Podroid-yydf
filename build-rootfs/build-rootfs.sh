@@ -171,6 +171,21 @@ mkdir -p "$ROOTFS/etc/containers"
 cp /work/files/etc/containers/storage.conf "$ROOTFS/etc/containers/storage.conf"
 chmod 0644 "$ROOTFS/etc/containers/storage.conf"
 
+# Docker Hub pull-through mirrors, so `podman pull` and `docker pull` inside
+# the VM work out of the box instead of hitting registry-1.docker.io directly
+# (slow/unreachable on many networks). Mirrors only change who serves the
+# blobs - image content and digests are untouched, and both engines fall back
+# to docker.io when every mirror fails.
+#
+#   /etc/containers/registries.conf.d/85-podroid-mirrors.conf  -> podman
+#   /etc/docker/daemon.json                                    -> dockerd
+mkdir -p "$ROOTFS/etc/containers/registries.conf.d" "$ROOTFS/etc/docker"
+cp /work/files/etc/containers/registries.conf.d/85-podroid-mirrors.conf \
+   "$ROOTFS/etc/containers/registries.conf.d/85-podroid-mirrors.conf"
+cp /work/files/etc/docker/daemon.json "$ROOTFS/etc/docker/daemon.json"
+chmod 0644 "$ROOTFS/etc/containers/registries.conf.d/85-podroid-mirrors.conf" \
+           "$ROOTFS/etc/docker/daemon.json"
+
 # Offline copy of the docs/guide site, staged into /work/docs-guide by
 # build_rootfs() in build-all.sh (this must run after the "Strip docs" rm -rf
 # above, or mksquashfs would ship nothing here). Served in-guest by

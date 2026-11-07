@@ -117,6 +117,50 @@ jobs:
             [ -s "$f" ] || { echo "MISSING PAYLOAD: $f"; exit 1; }
           done
 
+      - name: Inject container registry mirrors into the VM payload
+        run: |
+          set -euo pipefail
+          # The rootfs squashfs above comes from the UPSTREAM release APK, so
+          # anything we add under build-rootfs/files/ never reaches it. Splice
+          # our Docker Hub mirror config into the squashfs instead, repacking
+          # with the exact options upstream's Dockerfile.rootfs uses.
+          #
+          # Runs as root on purpose: newuidmap/newgidmap carry a
+          # security.capability xattr that rootless Podman needs, and only root
+          # can read/restore that xattr during unpack+repack.
+          SQUASH=app/src/main/assets/alpine-rootfs.squashfs
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq squashfs-tools
+          echo "compressor: $(unsquashfs -s "$SQUASH" | sed -n 's/^Compression \([a-z]*\).*/\1/p' | head -1)"
+          sudo unsquashfs -q -d /tmp/rootfs "$SQUASH"
+          BEFORE=$(sudo find /tmp/rootfs | wc -l)
+          sudo install -D -m0644 -o root -g root \
+            build-rootfs/files/etc/docker/daemon.json \
+            /tmp/rootfs/etc/docker/daemon.json
+          sudo install -D -m0644 -o root -g root \
+            build-rootfs/files/etc/containers/registries.conf.d/85-podroid-mirrors.conf \
+            /tmp/rootfs/etc/containers/registries.conf.d/85-podroid-mirrors.conf
+          rm -f "$SQUASH"
+          sudo mksquashfs /tmp/rootfs "$SQUASH" \
+            -comp zstd -Xcompression-level 19 -all-root -noappend -no-progress
+          ls -l "$SQUASH"
+          echo "entries before=${BEFORE} after=$(unsquashfs -l "$SQUASH" | wc -l)"
+          # Fail the build rather than ship a VM whose mirrors are missing.
+          unsquashfs -cat "$SQUASH" etc/docker/daemon.json > /tmp/daemon.json
+          unsquashfs -cat "$SQUASH" etc/containers/registries.conf.d/85-podroid-mirrors.conf > /tmp/mirrors.conf
+          grep -q 'docker.1ms.run' /tmp/daemon.json
+          grep -q 'docker.1ms.run' /tmp/mirrors.conf
+          # Capability xattrs must survive the repack or rootless Podman breaks.
+          sudo unsquashfs -q -d /tmp/verify "$SQUASH" usr/bin/newuidmap
+          sudo getcap /tmp/verify/usr/bin/newuidmap | tee -a "$GITHUB_STEP_SUMMARY"
+          sudo getcap /tmp/verify/usr/bin/newuidmap | grep -q cap_setuid
+          {
+            echo '### Registry mirrors baked into the VM payload'
+            echo '```'
+            cat /tmp/daemon.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Build signed release APK
         env:
           PODROID_VERSION_CODE: ${{ steps.ver.outputs.code }}
