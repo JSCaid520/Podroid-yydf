@@ -25,8 +25,10 @@ android {
         applicationId = "com.excp.podroid"
         minSdk = 26
         targetSdk = 36
-        versionCode = 34
-        versionName = "1.3.0"
+        // CI injects these so every Actions build is installable as an upgrade:
+        // versionCode must strictly increase, versionName is just a label.
+        versionCode = System.getenv("PODROID_VERSION_CODE")?.toIntOrNull() ?: 34
+        versionName = System.getenv("PODROID_VERSION_NAME") ?: "1.3.0"
         buildConfigField("String", "QEMU_VERSION", "\"$podroidQemuVersion\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
