@@ -12,6 +12,12 @@
  * Drag it anywhere; on release it snaps to the nearer screen edge, and it starts
  * out docked to the right edge (a little above the middle) so it never sits in
  * the way of the content underneath.
+ *
+ * Idle behaviour: a few seconds without a touch and the ball slides most of the
+ * way off the docked edge, leaving a [PEEK_SLIVER_DP] strip on screen. A 44dp
+ * circle parked over a fullscreen video is an obstruction; a thin edge strip is
+ * not. Tapping the strip brings the whole ball back - that tap does not open the
+ * panel, so the gesture always means "show me the ball again".
  */
 package com.excp.podroid.service
 
@@ -21,6 +27,8 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
@@ -60,6 +68,12 @@ class OverlayBubble(
         /** Where the ball starts vertically: 40% down the screen. */
         const val DOCK_Y_FRACTION = 0.40f
 
+        /** Idle time before the ball slides off the edge, in milliseconds. */
+        const val AUTO_PEEK_DELAY_MS = 4_000L
+
+        /** How much of the ball stays on screen while peeking (a tappable tab). */
+        const val PEEK_SLIVER_DP = 14
+
         const val ROW_BG = 0x33FFFFFF
 
         // Not `const`: an `.toInt()` conversion is not a compile-time constant in
@@ -88,6 +102,12 @@ class OverlayBubble(
      * opposite side, otherwise it would cover the ball it belongs to.
      */
     private var dockedLeft = false
+
+    /** True while the ball is mostly off-screen, showing only a thin strip. */
+    private var peeked = false
+
+    private val idleHandler = Handler(Looper.getMainLooper())
+    private val peekRunnable = Runnable { peekToEdge() }
 
     fun isShowing(): Boolean = root != null
 
@@ -129,6 +149,7 @@ class OverlayBubble(
             root = view
             params = windowParams
             dockToEdge()
+            schedulePeek()
             true
         } catch (e: Throwable) {
             // OEMs can refuse even with the grant (e.g. the permission was just
@@ -140,6 +161,9 @@ class OverlayBubble(
     }
 
     fun hide() {
+        // Cancel first: an idle peek must never fire against a removed window.
+        idleHandler.removeCallbacks(peekRunnable)
+        peeked = false
         val view = root ?: return
         runCatching { windowManager.removeView(view) }
             .onFailure { Log.w(TAG, "could not remove the overlay view", it) }
@@ -236,12 +260,20 @@ class OverlayBubble(
         var startX = 0
         var startY = 0
         var dragging = false
+        // Set when this gesture began by un-peeking, so the release that ends the
+        // tap does not also open the panel: "tap the strip" means "show the ball".
+        var justUnpeeked = false
         return View.OnTouchListener { _, event ->
             val p = params ?: return@OnTouchListener false
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
+                    idleHandler.removeCallbacks(peekRunnable)
+                    justUnpeeked = unpeek()
                     downRawX = event.rawX
                     downRawY = event.rawY
+                    // Sampled after un-peeking: a drag that starts on the strip
+                    // must not begin from the off-screen x, or the ball jumps on
+                    // the first move.
                     startX = p.x
                     startY = p.y
                     dragging = false
@@ -260,12 +292,23 @@ class OverlayBubble(
                 }
                 MotionEvent.ACTION_UP -> {
                     // A tap (no movement past touchSlop) opens/closes the panel;
-                    // anything longer is a drag and just re-docks.
-                    if (dragging) snapToEdge() else togglePanel()
+                    // a drag just re-docks; the first tap after peeking only
+                    // brings the ball back.
+                    if (dragging) {
+                        snapToEdge()
+                        schedulePeek()
+                    } else if (justUnpeeked) {
+                        justUnpeeked = false
+                        schedulePeek()
+                    } else {
+                        togglePanel()
+                    }
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
                     if (dragging) snapToEdge()
+                    justUnpeeked = false
+                    schedulePeek()
                     true
                 }
                 else -> false
@@ -277,6 +320,8 @@ class OverlayBubble(
         val panelView = panel ?: return
         expanded = !expanded
         if (expanded) {
+            // Never peek while the panel is open; the user is clearly busy here.
+            idleHandler.removeCallbacks(peekRunnable)
             status?.text = statusLine()
             orderPanelForDock()
         }
@@ -287,6 +332,7 @@ class OverlayBubble(
         // left the ball stranded near the middle of the screen instead of
         // hugging the edge it had been docked to.
         dockToEdge()
+        if (!expanded) schedulePeek()
     }
 
     private fun collapse() {
@@ -294,6 +340,46 @@ class OverlayBubble(
         expanded = false
         panel?.visibility = View.GONE
         dockToEdge()
+        schedulePeek()
+    }
+
+    // ---- idle peeking ------------------------------------------------------
+
+    /** (Re)arms the idle timer. Any touch cancels it first. */
+    private fun schedulePeek() {
+        idleHandler.removeCallbacks(peekRunnable)
+        idleHandler.postDelayed(peekRunnable, AUTO_PEEK_DELAY_MS)
+    }
+
+    /**
+     * Slides the ball most of the way off its docked edge. Only [PEEK_SLIVER_DP]
+     * stays on screen, so a fullscreen video is barely touched while the ball
+     * still advertises itself as a grabbable strip.
+     */
+    private fun peekToEdge() {
+        val view = root ?: return
+        if (expanded || peeked) return
+        val sliver = dp(PEEK_SLIVER_DP)
+        val metrics = context.resources.displayMetrics
+        val width = if (view.width > 0) view.width else dp(BALL_DP + BALL_MARGIN_DP)
+        val p = params ?: return
+        p.x = if (dockedLeft) -(width - sliver) else (metrics.widthPixels - sliver)
+        peeked = true
+        runCatching { windowManager.updateViewLayout(view, p) }
+    }
+
+    /** Brings the whole ball back. Returns true when it actually was peeking. */
+    private fun unpeek(): Boolean {
+        if (!peeked) return false
+        val view = root
+        val p = params
+        peeked = false
+        if (view == null || p == null) return true
+        val metrics = context.resources.displayMetrics
+        val width = if (view.width > 0) view.width else dp(BALL_DP + BALL_MARGIN_DP)
+        p.x = if (dockedLeft) 0 else (metrics.widthPixels - width).coerceAtLeast(0)
+        runCatching { windowManager.updateViewLayout(view, p) }
+        return true
     }
 
     /**
