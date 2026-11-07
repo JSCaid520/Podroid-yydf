@@ -78,6 +78,7 @@ import com.excp.podroid.util.DeviceResourcePolicy
 import com.excp.podroid.util.isGranted
 import com.excp.podroid.util.openAppDetailsSettings
 import com.excp.podroid.util.requestBatteryOptimizationExemption
+import com.excp.podroid.util.requestOverlayPermission
 import kotlinx.coroutines.launch
 
 private const val DEFAULT_STORAGE_GB = 8
