@@ -600,15 +600,17 @@ class QemuEngine @Inject constructor(
         val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(
             android.os.Environment.DIRECTORY_DOWNLOADS
         )
-        val hasStorageAccess = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R)
-            android.os.Environment.isExternalStorageManager()
-        else
-            androidx.core.content.ContextCompat.checkSelfPermission(
-                context, android.Manifest.permission.WRITE_EXTERNAL_STORAGE
-            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        if (config.storageAccessEnabled &&
-            hasStorageAccess &&
-            downloadsDir.exists()) {
+        // Ask the filesystem instead of the permission table. 9p serves the
+        // directory as this app's uid, so "can I actually write here" is the
+        // real question; a permission lookup only approximates it and gets it
+        // wrong whenever the manifest cap and the OS model disagree (Android 10
+        // with WRITE_EXTERNAL_STORAGE capped below 29 → permanently "denied"
+        // even when legacy storage is fully usable). Worse, a wrong "no" is
+        // silent on the host: the guest only logs
+        // "9pnet_virtio: no channels available for device downloads".
+        val downloadsExists = downloadsDir.exists()
+        val downloadsWritable = downloadsExists && isWritableDirectory(downloadsDir)
+        if (config.storageAccessEnabled && downloadsWritable) {
             // security_model=none passes file ownership/mode straight through
             // with no xattr mapping. mapped-xattr routed through QEMU's 9p
             // chmod/chown syscall path, which triggered SIGILL on Tensor /
@@ -617,6 +619,12 @@ class QemuEngine @Inject constructor(
             args += "local,id=fsdev0,path=${downloadsDir.absolutePath},security_model=none"
             args += "-device"
             args += "virtio-9p-pci,fsdev=fsdev0,mount_tag=downloads"
+        } else if (config.storageAccessEnabled) {
+            Log.w(
+                TAG,
+                "Downloads share skipped: exists=$downloadsExists writable=$downloadsWritable " +
+                    "path=${downloadsDir.absolutePath} sdk=${android.os.Build.VERSION.SDK_INT}",
+            )
         }
 
         val netdevArg = buildString {
@@ -787,6 +795,26 @@ class QemuEngine @Inject constructor(
      */
     override fun rulesAppliedAtLaunch(all: Collection<PortForwardRule>): Set<PortForwardRule> =
         inlineLaunchRules(all).toSet()
+
+    /**
+     * Can this app really read and write [dir] by path?
+     *
+     * A permission check answers a proxy question and lies in both directions:
+     * Android 10 needs WRITE_EXTERNAL_STORAGE, but a manifest cap (or a ROM that
+     * keeps legacy storage available) separates the grant from reality. Creating
+     * and deleting a dotfile answers the question QEMU's 9p server will actually
+     * face when it stats and opens files here.
+     */
+    private fun isWritableDirectory(dir: File): Boolean = try {
+        val probe = File(dir, ".podroid-write-test")
+        if (probe.exists()) probe.delete()
+        probe.writeText("")
+        probe.delete()
+        true
+    } catch (e: Exception) {
+        Log.w(TAG, "Downloads dir not writable by path", e)
+        false
+    }
 
     companion object {
         private const val TAG = "QemuEngine"

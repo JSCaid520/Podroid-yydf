@@ -54,7 +54,11 @@
     <!-- Storage access for persistent container storage -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <!-- maxSdkVersion must cover Android 10 (API 29): that release still uses the
+         legacy permission model, and capping at 28 makes the permission
+         undeclarable there, so the Downloads share could never be granted. -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
 
     <!-- Large heap for QEMU memory allocation -->
     <uses-feature android:name="android.hardware.opengles.aep" android:required="false" />
@@ -90,6 +94,7 @@
         android:hardwareAccelerated="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:requestLegacyExternalStorage="true"
         android:largeHeap="true"
         android:usesCleartextTraffic="true"
         android:roundIcon="@mipmap/ic_launcher_round"

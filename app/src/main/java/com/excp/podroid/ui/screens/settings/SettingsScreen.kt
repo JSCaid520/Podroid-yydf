@@ -175,11 +175,17 @@ fun SettingsScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME &&
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-                !Environment.isExternalStorageManager()
-            ) {
-                viewModel.setStorageAccessEnabled(false)
+            if (event == Lifecycle.Event.ON_RESUME) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    if (!Environment.isExternalStorageManager()) viewModel.setStorageAccessEnabled(false)
+                } else if (ContextCompat.checkSelfPermission(
+                        ctx, android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+                    ) != PackageManager.PERMISSION_GRANTED
+                ) {
+                    // Same idea for the legacy model (Android 10 and below): never
+                    // leave the toggle on while the share cannot actually work.
+                    viewModel.setStorageAccessEnabled(false)
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -1009,7 +1015,25 @@ private fun DownloadsSharingRow(
 ) {
     val context = LocalContext.current
     val canManageAllFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
-    val writeStoragePermLauncher = rememberLauncherForActivityResult(RequestPermission()) { _ -> }
+
+    fun openAppDetailsSettings() {
+        runCatching {
+            context.startActivity(
+                Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:${context.packageName}"),
+                )
+            )
+        }
+    }
+
+    val writeStoragePermLauncher = rememberLauncherForActivityResult(RequestPermission()) { granted ->
+        // Denied — or nothing was shown at all because this OS version does not
+        // declare the permission. Either way the app details page is the only
+        // place left to grant it manually; doing nothing here is why the toggle
+        // used to look broken (share silently never activated).
+        if (!granted) openAppDetailsSettings()
+    }
 
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.R)
     fun openAllFilesAccessSettings() {
