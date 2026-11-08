@@ -117,13 +117,13 @@ jobs:
             [ -s "$f" ] || { echo "MISSING PAYLOAD: $f"; exit 1; }
           done
 
-      - name: Inject container registry mirrors into the VM payload
+      - name: Splice our config into the VM payload
         run: |
           set -euo pipefail
           # The rootfs squashfs above comes from the UPSTREAM release APK, so
           # anything we add under build-rootfs/files/ never reaches it. Splice
-          # our Docker Hub mirror config into the squashfs instead, repacking
-          # with the exact options upstream's Dockerfile.rootfs uses.
+          # our files into the squashfs instead, repacking with the exact options
+          # upstream's Dockerfile.rootfs uses.
           #
           # Runs as root on purpose: newuidmap/newgidmap carry a
           # security.capability xattr that rootless Podman needs, and only root
@@ -140,6 +140,12 @@ jobs:
           sudo install -D -m0644 -o root -g root \
             build-rootfs/files/etc/containers/registries.conf.d/85-podroid-mirrors.conf \
             /tmp/rootfs/etc/containers/registries.conf.d/85-podroid-mirrors.conf
+          # podroid-backup must support both engines (the image ships podman and
+          # docker); keep the image's copy in sync with the repo, as the upstream
+          # squashfs has the podman-only version.
+          sudo install -D -m0755 -o root -g root \
+            build-rootfs/files/usr/local/bin/podroid-backup \
+            /tmp/rootfs/usr/local/bin/podroid-backup
           rm -f "$SQUASH"
           sudo mksquashfs /tmp/rootfs "$SQUASH" \
             -comp zstd -Xcompression-level 19 -all-root -noappend -no-progress
@@ -150,6 +156,12 @@ jobs:
           unsquashfs -cat "$SQUASH" etc/containers/registries.conf.d/85-podroid-mirrors.conf > /tmp/mirrors.conf
           grep -q 'docker.1ms.run' /tmp/daemon.json
           grep -q 'docker.1ms.run' /tmp/mirrors.conf
+          # ...or whose backup tool only knows podman.
+          unsquashfs -cat "$SQUASH" usr/local/bin/podroid-backup > /tmp/podroid-backup
+          grep -q 'installed_engines' /tmp/podroid-backup
+          grep -q 'docker) docker export' /tmp/podroid-backup
+          unsquashfs -lls "$SQUASH" usr/local/bin/podroid-backup | tee -a "$GITHUB_STEP_SUMMARY"
+          unsquashfs -lls "$SQUASH" usr/local/bin/podroid-backup | grep -q '^-rwxr-xr-x'
           # Capability xattrs must survive the repack or rootless Podman breaks.
           sudo unsquashfs -q -d /tmp/verify "$SQUASH" usr/bin/newuidmap
           sudo getcap /tmp/verify/usr/bin/newuidmap | tee -a "$GITHUB_STEP_SUMMARY"
@@ -158,6 +170,10 @@ jobs:
             echo '### Registry mirrors baked into the VM payload'
             echo '```'
             cat /tmp/daemon.json
+            echo '```'
+            echo '### podroid-backup supports podman + docker'
+            echo '```'
+            grep -n 'ENGINES=' /tmp/podroid-backup
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 

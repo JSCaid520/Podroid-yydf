@@ -1,28 +1,43 @@
 #!/bin/sh
 # Podroid container backup — export containers/images to tar archives.
+#
+# The guest ships two engines (rootless podman and dockerd). Both are supported
+# here: `all` exports the containers of every installed engine, `list` shows
+# them per engine, and `export`/`save` operate on whichever engine actually has
+# the container/image. Archive names carry the engine, so a container name that
+# exists in both does not overwrite the other's backup.
+#
 # With Downloads sharing: /mnt/downloads/Podroid/backups/
 # Otherwise: /var/backups/podroid/
 set -eu
 
+ENGINES="podman docker"
+
 backup_root() {
-	if mountpoint -q /mnt/downloads 2>/dev/null; then
+	# PODROID_BACKUP_ROOT overrides the target directory (used by the project's
+	# own tests; harmless to leave in place for scripted runs).
+	if [ -n "${PODROID_BACKUP_ROOT:-}" ]; then
+		printf '%s\n' "$PODROID_BACKUP_ROOT"
+	elif mountpoint -q /mnt/downloads 2>/dev/null; then
 		printf '%s\n' "/mnt/downloads/Podroid/backups"
 	else
 		printf '%s\n' "/var/backups/podroid"
 	fi
 }
 
+# Both CLIs print a notification id on success (podroid-hostd answers with the
+# posted id); redirect it, or the id looks like a stray number in the terminal.
 notify_ok() {
 	body="$1"
 	if command -v podroid-notify >/dev/null 2>&1; then
-		podroid-notify --title "Podroid backup" "$body" 2>/dev/null || true
+		podroid-notify --title "Podroid backup" "$body" >/dev/null 2>&1 || true
 	fi
 }
 
 notify_err() {
 	body="$1"
 	if command -v podroid-notify >/dev/null 2>&1; then
-		podroid-notify --priority high --title "Podroid backup failed" "$body" 2>/dev/null || true
+		podroid-notify --priority high --title "Podroid backup failed" "$body" >/dev/null 2>&1 || true
 	fi
 }
 
@@ -34,6 +49,10 @@ usage:
   podroid-backup save <image> [output.tar]
   podroid-backup all
 
+Both podman and docker are supported; an engine that is not installed is
+skipped. Archives are written to /mnt/downloads/Podroid/backups when Downloads
+sharing is enabled, otherwise to /var/backups/podroid.
+
 Examples:
   podroid-backup list
   podroid-backup export my-nginx
@@ -42,12 +61,74 @@ Examples:
 EOF
 }
 
+engine_installed() {
+	command -v "$1" >/dev/null 2>&1
+}
+
+# Space-separated list of the engines actually present in this image.
+installed_engines() {
+	for e in $ENGINES; do
+		engine_installed "$e" && printf '%s ' "$e"
+	done
+}
+
+engine_ids() {
+	case "$1" in
+		podman) podman ps -aq 2>/dev/null ;;
+		docker) docker ps -aq 2>/dev/null ;;
+	esac
+}
+
+engine_name_of() {
+	case "$1" in
+		podman) podman inspect -f '{{.Name}}' "$2" 2>/dev/null | sed 's#^/##' ;;
+		docker) docker inspect -f '{{.Name}}' "$2" 2>/dev/null | sed 's#^/##' ;;
+	esac
+}
+
+engine_has_container() {
+	case "$1" in
+		podman) podman ps -a --format '{{.Names}}' 2>/dev/null | grep -Fxq -e "$2" ;;
+		docker) docker ps -a --format '{{.Names}}' 2>/dev/null | grep -Fxq -e "$2" ;;
+	esac
+}
+
+engine_has_image() {
+	case "$1" in
+		podman) podman image exists "$2" >/dev/null 2>&1 ;;
+		docker) docker image inspect "$2" >/dev/null 2>&1 ;;
+	esac
+}
+
+engine_export() {
+	case "$1" in
+		podman) podman export "$2" -o "$3" ;;
+		docker) docker export "$2" -o "$3" ;;
+	esac
+}
+
+engine_save() {
+	case "$1" in
+		podman) podman save "$2" -o "$3" ;;
+		docker) docker save "$2" -o "$3" ;;
+	esac
+}
+
 cmd_list() {
-	if ! command -v podman >/dev/null 2>&1; then
-		echo "podman not found" >&2
-		return 1
+	total=0
+	for e in $(installed_engines); do
+		printf '== %s ==\n' "$e"
+		case "$e" in
+			podman) podman ps -a --format 'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || true ;;
+			docker) docker ps -a --format 'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || true ;;
+		esac
+		n="$(engine_ids "$e" | wc -l | tr -d ' ')"
+		printf '\n'
+		total=$((total + n))
+	done
+	if [ "$total" -eq 0 ]; then
+		echo "no containers on any installed engine"
 	fi
-	podman ps -a --format 'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
 }
 
 safe_name() {
@@ -59,16 +140,35 @@ cmd_export() {
 	out="${2:-}"
 	root="$(backup_root)"
 	mkdir -p "$root"
-	if [ -z "$out" ]; then
-		stamp="$(date +%Y%m%d-%H%M%S)"
-		out="$root/$(safe_name "$name")-$stamp.tar"
-	fi
-	if ! podman export "$name" -o "$out"; then
-		notify_err "export failed for $name"
+	hit=0
+	for e in $(installed_engines); do
+		if ! engine_has_container "$e" "$name"; then
+			continue
+		fi
+		hit=1
+		if [ -n "$out" ]; then
+			# An explicit target holds one archive, so the first engine that has
+			# this container wins.
+			target="$out"
+		else
+			target="$root/$(safe_name "$name")-$e-$(date +%Y%m%d-%H%M%S).tar"
+		fi
+		if engine_export "$e" "$name" "$target"; then
+			echo "exported $name ($e) -> $target"
+			notify_ok "Exported container $name ($e)"
+		else
+			notify_err "export failed for $name ($e)"
+			return 1
+		fi
+		if [ -n "$out" ]; then
+			break
+		fi
+	done
+	if [ "$hit" -eq 0 ]; then
+		echo "no such container on any installed engine: $name" >&2
 		return 1
 	fi
-	echo "exported $name -> $out"
-	notify_ok "Exported container $name"
+	return 0
 }
 
 cmd_save() {
@@ -76,16 +176,33 @@ cmd_save() {
 	out="${2:-}"
 	root="$(backup_root)"
 	mkdir -p "$root"
-	if [ -z "$out" ]; then
-		stamp="$(date +%Y%m%d-%H%M%S)"
-		out="$root/$(safe_name "$ref")-$stamp.tar"
-	fi
-	if ! podman save "$ref" -o "$out"; then
-		notify_err "save failed for $ref"
+	hit=0
+	for e in $(installed_engines); do
+		if ! engine_has_image "$e" "$ref"; then
+			continue
+		fi
+		hit=1
+		if [ -n "$out" ]; then
+			target="$out"
+		else
+			target="$root/$(safe_name "$ref")-$e-$(date +%Y%m%d-%H%M%S).tar"
+		fi
+		if engine_save "$e" "$ref" "$target"; then
+			echo "saved $ref ($e) -> $target"
+			notify_ok "Saved image $ref ($e)"
+		else
+			notify_err "save failed for $ref ($e)"
+			return 1
+		fi
+		if [ -n "$out" ]; then
+			break
+		fi
+	done
+	if [ "$hit" -eq 0 ]; then
+		echo "no such image on any installed engine: $ref" >&2
 		return 1
 	fi
-	echo "saved $ref -> $out"
-	notify_ok "Saved image $ref"
+	return 0
 }
 
 cmd_all() {
@@ -93,26 +210,40 @@ cmd_all() {
 	mkdir -p "$root"
 	ok=0
 	fail=0
-	for id in $(podman ps -aq 2>/dev/null); do
-		name="$(podman inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's#^/##')"
-		[ -n "$name" ] || name="$id"
-		stamp="$(date +%Y%m%d-%H%M%S)"
-		out="$root/$(safe_name "$name")-$stamp.tar"
-		if podman export "$name" -o "$out" 2>/dev/null; then
-			ok=$((ok + 1))
-			echo "exported $name -> $out"
-		else
-			fail=$((fail + 1))
-			echo "failed $name" >&2
+	for e in $(installed_engines); do
+		# `|| true`: a CLI that exists but fails (daemon down, rootless
+		# permission trouble) must read as "no containers", not abort the whole
+		# run under `set -e`.
+		ids="$(engine_ids "$e" || true)"
+		if [ -z "$ids" ]; then
+			echo "no containers on $e"
+			continue
 		fi
+		for id in $ids; do
+			name="$(engine_name_of "$e" "$id")"
+			[ -n "$name" ] || name="$id"
+			stamp="$(date +%Y%m%d-%H%M%S)"
+			target="$root/$(safe_name "$name")-$e-$stamp.tar"
+			if engine_export "$e" "$name" "$target" 2>/dev/null; then
+				ok=$((ok + 1))
+				echo "exported $name ($e) -> $target"
+			else
+				fail=$((fail + 1))
+				echo "failed $name ($e)" >&2
+			fi
+		done
 	done
+	if [ "$ok" -eq 0 ] && [ "$fail" -eq 0 ]; then
+		echo "nothing to back up: no containers were found ($(installed_engines))" >&2
+		return 0
+	fi
 	notify_ok "Backed up $ok container(s)${fail:+, $fail failed}"
 	echo "done: $ok ok, $fail failed"
 }
 
 main() {
-	if ! command -v podman >/dev/null 2>&1; then
-		echo "podman not installed" >&2
+	if [ -z "$(installed_engines)" ]; then
+		echo "neither podman nor docker is installed" >&2
 		return 1
 	fi
 
