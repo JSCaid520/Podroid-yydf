@@ -225,6 +225,27 @@
     <string name="container_backup_none">Downloads/Podroid/backups 中尚未找到备份归档。</string>
     <string name="container_backup_list_error">无法读取备份文件夹，请点击刷新重试。</string>
     <string name="container_backup_copied">命令已复制</string>
+    <string name="container_backup_whole_vm">整机迁移（A 方案）</string>
+    <string name="container_backup_whole_vm_desc">把虚拟机磁盘（storage.img）导出成一个文件，也能再导回去。容器、镜像、配置和文件全部随磁盘一起搬走，是给新手机部署最快的方式。操作前必须先停止虚拟机；导入会覆盖当前磁盘。</string>
+    <string name="container_backup_disk_image">虚拟机磁盘</string>
+    <string name="container_backup_disk_missing">尚未创建</string>
+    <string name="container_backup_export_disk">导出虚拟机磁盘</string>
+    <string name="container_backup_import_disk">导入虚拟机磁盘</string>
+    <string name="container_backup_disk_must_stop">请先停止虚拟机：运行中的客户机仍在写磁盘，拷出来的是坏的。</string>
+    <string name="container_backup_exporting">正在导出磁盘镜像…</string>
+    <string name="container_backup_importing">正在导入磁盘镜像…</string>
+    <string name="container_backup_transfer_progress">%1$d%% · %2$s / %3$s</string>
+    <string name="container_backup_export_done">磁盘已导出。请保管好这个文件——它装着本机全部容器。</string>
+    <string name="container_backup_import_done">磁盘已导入，启动虚拟机即可从它开机。</string>
+    <string name="container_backup_transfer_failed">复制失败。原磁盘未被改动，请重试或换一个保存位置。</string>
+    <string name="container_backup_dismiss">关闭</string>
+    <string name="container_backup_import_confirm_title">替换虚拟机磁盘？</string>
+    <string name="container_backup_import_confirm_body">将用「%1$s」（%2$s）替换 storage.img。当前虚拟机里的容器、镜像和文件都会被替换掉。</string>
+    <string name="container_backup_import_confirm_ok">替换</string>
+    <string name="container_backup_plan_b">单容器迁移（B 方案）</string>
+    <string name="container_backup_plan_b_desc">在虚拟机终端里导出单个容器，再把 .tar 和同名 .meta 一起放进新手机的 Downloads/Podroid/backups。点下面的归档会复制：podroid-backup import &lt;归档&gt; —— .meta 会还原环境变量、端口、目录挂载和启动命令。</string>
+    <string name="container_backup_restore">恢复</string>
+    <string name="container_backup_restore_hint">点一个归档复制恢复命令，然后在（新手机的）Podroid 终端里执行。</string>
 
     <!-- Home -->
     <string name="home_containers_created">已创建容器</string>

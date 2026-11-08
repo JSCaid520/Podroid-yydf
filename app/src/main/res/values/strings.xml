@@ -225,6 +225,27 @@
     <string name="container_backup_none">No backup archives found in Downloads/Podroid/backups yet.</string>
     <string name="container_backup_list_error">Couldn\'t read the backup folder. Try Refresh.</string>
     <string name="container_backup_copied">Command copied</string>
+    <string name="container_backup_whole_vm">Move the whole VM (plan A)</string>
+    <string name="container_backup_whole_vm_desc">Copies the VM disk image (storage.img) to a file you pick, and can put one back. Every container, image, setting and file moves with it — the fastest way to set up a new phone. Stop the VM first; a restore replaces the current disk.</string>
+    <string name="container_backup_disk_image">VM disk image</string>
+    <string name="container_backup_disk_missing">not created yet</string>
+    <string name="container_backup_export_disk">Export VM disk</string>
+    <string name="container_backup_import_disk">Import VM disk</string>
+    <string name="container_backup_disk_must_stop">Stop the VM first: a running guest keeps writing to the disk.</string>
+    <string name="container_backup_exporting">Exporting the disk image…</string>
+    <string name="container_backup_importing">Importing the disk image…</string>
+    <string name="container_backup_transfer_progress">%1$d%% · %2$s / %3$s</string>
+    <string name="container_backup_export_done">Disk exported. Keep this file safe — it holds every container on this phone.</string>
+    <string name="container_backup_import_done">Disk imported. Start the VM to boot from it.</string>
+    <string name="container_backup_transfer_failed">Copy failed. The previous disk was left untouched; try again or pick another location.</string>
+    <string name="container_backup_dismiss">Dismiss</string>
+    <string name="container_backup_import_confirm_title">Replace the VM disk?</string>
+    <string name="container_backup_import_confirm_body">This replaces storage.img with “%1$s” (%2$s). Everything in the current VM — containers, images and files — is replaced.</string>
+    <string name="container_backup_import_confirm_ok">Replace</string>
+    <string name="container_backup_plan_b">Move one container (plan B)</string>
+    <string name="container_backup_plan_b_desc">Export one container in the VM terminal, then copy the .tar together with its .meta file into Downloads/Podroid/backups on the new phone. Tapping an archive below copies: podroid-backup import &lt;archive&gt; — the .meta restores env vars, ports, bind mounts and the start command.</string>
+    <string name="container_backup_restore">Restore</string>
+    <string name="container_backup_restore_hint">Tap an archive to copy its restore command, then run it in the Podroid terminal on the new phone.</string>
 
     <!-- Home -->
     <string name="home_containers_created">Containers created</string>

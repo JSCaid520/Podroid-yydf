@@ -1,5 +1,7 @@
 package com.excp.podroid.ui.screens.backup
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -11,15 +13,18 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -51,6 +56,44 @@ fun ContainerBackupScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val copiedMessage = stringResource(R.string.container_backup_copied)
+    val diskBlockedMessage = stringResource(R.string.container_backup_disk_must_stop)
+
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        if (uri != null) viewModel.exportDisk(uri)
+    }
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) viewModel.stageImport(uri)
+    }
+
+    ui.pendingImport?.let { pending ->
+        AlertDialog(
+            onDismissRequest = viewModel::cancelImport,
+            title = { Text(stringResource(R.string.container_backup_import_confirm_title)) },
+            text = {
+                Text(
+                    stringResource(
+                        R.string.container_backup_import_confirm_body,
+                        pending.name,
+                        viewModel.formatSize(pending.sizeBytes),
+                    ),
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = viewModel::confirmImport) {
+                    Text(stringResource(R.string.container_backup_import_confirm_ok))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::cancelImport) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -84,6 +127,99 @@ fun ContainerBackupScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
 
+                // --- Plan A: whole VM disk image ---------------------------------
+                PodroidSectionLabel(stringResource(R.string.container_backup_whole_vm))
+                Text(
+                    text = stringResource(R.string.container_backup_whole_vm_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                PodroidListRow(
+                    label = stringResource(R.string.container_backup_disk_image),
+                    value = ui.diskImageLabel.ifEmpty { stringResource(R.string.container_backup_disk_missing) },
+                    mono = true,
+                )
+                if (ui.vmRunning) {
+                    Text(
+                        text = diskBlockedMessage,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                val transfer = ui.transfer
+                val busy = transfer?.active == true
+                PodroidPrimaryButton(
+                    text = stringResource(R.string.container_backup_export_disk),
+                    onClick = {
+                        if (ui.vmRunning) {
+                            scope.launch { snackbarHostState.showSnackbar(diskBlockedMessage) }
+                        } else {
+                            exportLauncher.launch(viewModel.defaultDiskExportName())
+                        }
+                    },
+                    enabled = !ui.vmRunning && !busy,
+                )
+                PodroidGhostButton(
+                    text = stringResource(R.string.container_backup_import_disk),
+                    onClick = {
+                        if (ui.vmRunning) {
+                            scope.launch { snackbarHostState.showSnackbar(diskBlockedMessage) }
+                        } else {
+                            importLauncher.launch(arrayOf("application/octet-stream", "*/*"))
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (transfer != null) {
+                    Text(
+                        text = stringResource(
+                            if (transfer.importing) R.string.container_backup_importing else R.string.container_backup_exporting,
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    LinearProgressIndicator(
+                        progress = { transfer.percent / 100f },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        text = stringResource(
+                            R.string.container_backup_transfer_progress,
+                            transfer.percent,
+                            viewModel.formatSize(transfer.doneBytes),
+                            viewModel.formatSize(transfer.totalBytes),
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                    when {
+                        transfer.failed -> Text(
+                            text = stringResource(R.string.container_backup_transfer_failed),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+
+                        transfer.finished -> Text(
+                            text = stringResource(
+                                if (transfer.importing) R.string.container_backup_import_done
+                                else R.string.container_backup_export_done,
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = PodroidTokens.Amber,
+                        )
+
+                        else -> Unit
+                    }
+                    if (!transfer.active) {
+                        PodroidGhostButton(
+                            text = stringResource(R.string.container_backup_dismiss),
+                            onClick = viewModel::dismissTransfer,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+
                 PodroidSectionLabel(stringResource(R.string.container_backup_location))
                 PodroidListRow(
                     label = stringResource(R.string.container_backup_guest_path),
@@ -103,6 +239,14 @@ fun ContainerBackupScreen(
                         color = PodroidTokens.Amber,
                     )
                 }
+
+                // --- Plan B: one container at a time ----------------------------
+                PodroidSectionLabel(stringResource(R.string.container_backup_plan_b))
+                Text(
+                    text = stringResource(R.string.container_backup_plan_b_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
 
                 PodroidSectionLabel(stringResource(R.string.container_backup_export))
                 if (!ui.vmRunning) {
@@ -175,6 +319,11 @@ fun ContainerBackupScreen(
 
                 Spacer(Modifier.height(PodroidTokens.Spacing.SM))
                 PodroidSectionLabel(stringResource(R.string.container_backup_on_phone))
+                Text(
+                    text = stringResource(R.string.container_backup_restore_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 PodroidGhostButton(
                     text = stringResource(R.string.container_backup_refresh),
                     onClick = viewModel::refresh,
@@ -198,6 +347,12 @@ fun ContainerBackupScreen(
                             label = file.name,
                             value = "${viewModel.formatSize(file.sizeBytes)} · ${viewModel.formatDate(file.lastModifiedMs)}",
                             mono = true,
+                            trailing = stringResource(R.string.container_backup_restore),
+                            onClick = {
+                                if (viewModel.copyRestoreCommand(file.name)) {
+                                    scope.launch { snackbarHostState.showSnackbar(copiedMessage) }
+                                }
+                            },
                         )
                     }
                 }

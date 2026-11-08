@@ -7,6 +7,13 @@
 # the container/image. Archive names carry the engine, so a container name that
 # exists in both does not overwrite the other's backup.
 #
+# Two ways to move containers to another phone:
+#   * whole VM   — export/import the virtual disk from Podroid's backup screen
+#                  (App side, no commands needed; everything comes along)
+#   * one at time— `export`/`save` here, then `import` on the new phone, which
+#                  recreates the container from the sidecar metadata written
+#                  next to every archive (<archive>.meta)
+#
 # With Downloads sharing: /mnt/downloads/Podroid/backups/
 # Otherwise: /var/backups/podroid/
 set -eu
@@ -48,16 +55,29 @@ usage:
   podroid-backup export <container> [output.tar]
   podroid-backup save <image> [output.tar]
   podroid-backup all
+  podroid-backup import <archive.tar> [options]
 
 Both podman and docker are supported; an engine that is not installed is
 skipped. Archives are written to /mnt/downloads/Podroid/backups when Downloads
 sharing is enabled, otherwise to /var/backups/podroid.
+
+export/save/all also write <archive>.meta next to the archive: the container
+config (env vars, published ports, bind mounts, network, restart policy,
+entrypoint and command) that `import` needs to recreate it on another phone.
+
+import options:
+  --engine <docker|podman>   force the engine (default: from .meta or filename)
+  --name <name>              container name (default: from .meta or archive)
+  --replace                  remove an existing container with that name first
+  --no-run                   only create the container, do not start it
 
 Examples:
   podroid-backup list
   podroid-backup export my-nginx
   podroid-backup save docker.io/library/nginx:latest
   podroid-backup all
+  podroid-backup import /mnt/downloads/Podroid/backups/my-nginx-docker-20260101-120000.tar
+  podroid-backup import backup.tar --engine docker --name web --replace
 EOF
 }
 
@@ -114,6 +134,183 @@ engine_save() {
 	esac
 }
 
+engine_import() {
+	case "$1" in
+		podman) podman import "$2" "$3" ;;
+		docker) docker import "$2" "$3" ;;
+	esac
+}
+
+engine_load() {
+	case "$1" in
+		podman) podman load -i "$2" ;;
+		docker) docker load -i "$2" ;;
+	esac
+}
+
+engine_rm() {
+	case "$1" in
+		podman) podman rm -f "$2" ;;
+		docker) docker rm -f "$2" ;;
+	esac
+}
+
+engine_run() {
+	e="$1"
+	shift
+	case "$e" in
+		podman) podman run "$@" ;;
+		docker) docker run "$@" ;;
+	esac
+}
+
+engine_create() {
+	e="$1"
+	shift
+	case "$e" in
+		podman) podman create "$@" ;;
+		docker) docker create "$@" ;;
+	esac
+}
+
+# engine_inspect <engine> <object> '<go template>'
+engine_inspect() {
+	case "$1" in
+		podman) podman inspect -f "$3" "$2" 2>/dev/null ;;
+		docker) docker inspect -f "$3" "$2" 2>/dev/null ;;
+	esac
+}
+
+# --- sidecar metadata -------------------------------------------------------
+#
+# <archive>.meta is plain `key=value` lines (one inspect value per line, list
+# values indexed). It is read back by `import`; nothing else parses it.
+
+meta_lines() {
+	# meta_lines <engine> <container> <archive>
+	# Emits every config line import needs, in file order.
+	_e="$1"
+	_c="$2"
+	printf 'podroid_backup_meta=1\n'
+	printf 'kind=export\n'
+	printf 'engine=%s\n' "$_e"
+	printf 'container=%s\n' "$_c"
+	printf 'created=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	_v="$(engine_inspect "$_e" "$_c" '{{.Config.Image}}' || true)"
+	if [ -n "$_v" ]; then printf 'image=%s\n' "$_v"; fi
+	_v="$(engine_inspect "$_e" "$_c" '{{.HostConfig.RestartPolicy.Name}}' || true)"
+	if [ -n "$_v" ]; then printf 'restart=%s\n' "$_v"; fi
+	# Networks: the first one is enough to put the container back on the same
+	# bridge; extra user-defined networks are re-attachable by hand.
+	_v="$(engine_inspect "$_e" "$_c" '{{range $k, $x := .NetworkSettings.Networks}}{{println $k}}{{end}}' | head -n 1 || true)"
+	if [ -n "$_v" ]; then printf 'network=%s\n' "$_v"; fi
+	_tmp="$(mktemp)"
+	if engine_inspect "$_e" "$_c" '{{range .Config.Env}}{{println .}}{{end}}' >"$_tmp" 2>/dev/null; then
+		_i=0
+		while IFS= read -r line; do
+			[ -n "$line" ] || continue
+			_i=$((_i + 1))
+			printf 'env_%s=%s\n' "$_i" "$line"
+		done <"$_tmp"
+	fi
+	if engine_inspect "$_e" "$_c" '{{range .Config.Entrypoint}}{{println .}}{{end}}' >"$_tmp" 2>/dev/null; then
+		_i=0
+		while IFS= read -r line; do
+			[ -n "$line" ] || continue
+			_i=$((_i + 1))
+			printf 'entrypoint_%s=%s\n' "$_i" "$line"
+		done <"$_tmp"
+	fi
+	if engine_inspect "$_e" "$_c" '{{range .Config.Cmd}}{{println .}}{{end}}' >"$_tmp" 2>/dev/null; then
+		_i=0
+		while IFS= read -r line; do
+			[ -n "$line" ] || continue
+			_i=$((_i + 1))
+			printf 'cmd_%s=%s\n' "$_i" "$line"
+		done <"$_tmp"
+	fi
+	# Published ports as ip|hostPort|containerPort/proto.
+	if engine_inspect "$_e" "$_c" '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostIp}}|{{.HostPort}}|{{$p}}{{println}}{{end}}{{end}}' >"$_tmp" 2>/dev/null; then
+		_i=0
+		while IFS= read -r line; do
+			[ -n "$line" ] || continue
+			_i=$((_i + 1))
+			printf 'publish_%s=%s\n' "$_i" "$line"
+		done <"$_tmp"
+	fi
+	# Bind mounts only: named volumes are lost with `export` anyway (their data
+	# lives in a volume dir, not in the container filesystem).
+	if engine_inspect "$_e" "$_c" '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}|{{.Destination}}{{println}}{{end}}{{end}}' >"$_tmp" 2>/dev/null; then
+		_i=0
+		while IFS= read -r line; do
+			[ -n "$line" ] || continue
+			_i=$((_i + 1))
+			printf 'volume_%s=%s\n' "$_i" "$line"
+		done <"$_tmp"
+	fi
+	rm -f "$_tmp"
+}
+
+write_container_meta() {
+	# write_container_meta <engine> <archive> <container>
+	meta_lines "$1" "$3" >"$2.meta"
+	printf 'metadata: %s.meta\n' "$2"
+}
+
+write_image_meta() {
+	# write_image_meta <engine> <archive> <image ref>
+	{
+		printf 'podroid_backup_meta=1\n'
+		printf 'kind=save\n'
+		printf 'engine=%s\n' "$1"
+		printf 'image=%s\n' "$3"
+		printf 'created=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	} >"$2.meta"
+	printf 'metadata: %s.meta\n' "$2"
+}
+
+# meta_reset — clears the M_* variables so a missing .meta cannot trip `set -u`.
+meta_reset() {
+	M_KIND=""
+	M_ENGINE=""
+	M_IMAGE=""
+	M_CONTAINER=""
+	M_NETWORK=""
+	M_RESTART=""
+	M_ENVS=""
+	M_ENTRY=""
+	M_CMD=""
+	M_PUBS=""
+	M_VOLS=""
+}
+
+# load_meta <file> — fills the M_* variables `import` builds its command from.
+load_meta() {
+	meta_reset
+	[ -f "$1" ] || return 1
+	while IFS='=' read -r k v; do
+		case "$k" in
+			kind) M_KIND="$v" ;;
+			engine) M_ENGINE="$v" ;;
+			image) M_IMAGE="$v" ;;
+			container) M_CONTAINER="$v" ;;
+			network) M_NETWORK="$v" ;;
+			restart) M_RESTART="$v" ;;
+			env_*) M_ENVS="$M_ENVS$v
+" ;;
+			entrypoint_*) M_ENTRY="$M_ENTRY$v
+" ;;
+			cmd_*) M_CMD="$M_CMD$v
+" ;;
+			publish_*) M_PUBS="$M_PUBS$v
+" ;;
+			volume_*) M_VOLS="$M_VOLS$v
+" ;;
+		esac
+	done <"$1"
+	return 0
+}
+
 cmd_list() {
 	total=0
 	for e in $(installed_engines); do
@@ -154,6 +351,7 @@ cmd_export() {
 			target="$root/$(safe_name "$name")-$e-$(date +%Y%m%d-%H%M%S).tar"
 		fi
 		if engine_export "$e" "$name" "$target"; then
+			write_container_meta "$e" "$target" "$name" || true
 			echo "exported $name ($e) -> $target"
 			notify_ok "Exported container $name ($e)"
 		else
@@ -188,6 +386,7 @@ cmd_save() {
 			target="$root/$(safe_name "$ref")-$e-$(date +%Y%m%d-%H%M%S).tar"
 		fi
 		if engine_save "$e" "$ref" "$target"; then
+			write_image_meta "$e" "$target" "$ref" || true
 			echo "saved $ref ($e) -> $target"
 			notify_ok "Saved image $ref ($e)"
 		else
@@ -226,6 +425,7 @@ cmd_all() {
 			target="$root/$(safe_name "$name")-$e-$stamp.tar"
 			if engine_export "$e" "$name" "$target" 2>/dev/null; then
 				ok=$((ok + 1))
+				write_container_meta "$e" "$target" "$name" >/dev/null 2>&1 || true
 				echo "exported $name ($e) -> $target"
 			else
 				fail=$((fail + 1))
@@ -239,6 +439,202 @@ cmd_all() {
 	fi
 	notify_ok "Backed up $ok container(s)${fail:+, $fail failed}"
 	echo "done: $ok ok, $fail failed"
+}
+
+cmd_import() {
+	archive=""
+	opt_engine=""
+	opt_name=""
+	replace=0
+	start_it=1
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--engine)
+				[ $# -ge 2 ] || { echo "--engine needs a value" >&2; return 2; }
+				opt_engine="$2"
+				shift 2
+				;;
+			--name)
+				[ $# -ge 2 ] || { echo "--name needs a value" >&2; return 2; }
+				opt_name="$2"
+				shift 2
+				;;
+			--replace) replace=1; shift ;;
+			--no-run) start_it=0; shift ;;
+			-*) echo "unknown option: $1" >&2; usage; return 2 ;;
+			*) archive="$1"; shift ;;
+		esac
+	done
+	[ -n "$archive" ] || { usage; return 2; }
+	[ -f "$archive" ] || { echo "no such archive: $archive" >&2; return 1; }
+
+	meta_reset
+	load_meta "$archive.meta" && echo "using metadata: $archive.meta" || echo "no metadata file; guessing from the archive"
+
+	engine="${opt_engine:-${M_ENGINE:-}}"
+	if [ -z "$engine" ]; then
+		case "$archive" in
+			*-docker-*.tar*) engine=docker ;;
+			*-podman-*.tar*) engine=podman ;;
+		esac
+	fi
+	if [ -z "$engine" ]; then
+		for e in $(installed_engines); do
+			engine="$e"
+			break
+		done
+	fi
+	[ -n "$engine" ] || { echo "neither podman nor docker is installed" >&2; return 1; }
+	engine_installed "$engine" || { echo "$engine is not installed in this image" >&2; return 1; }
+
+	kind="$M_KIND"
+	if [ -z "$kind" ]; then
+		# `docker save`/`podman save` archives carry a manifest.json at the root;
+		# rootfs exports do not.
+		if tar -tf "$archive" 2>/dev/null | grep -qx 'manifest.json'; then
+			kind=save
+		else
+			kind=export
+		fi
+	fi
+
+	if [ "$kind" = save ]; then
+		out="$(engine_load "$engine" "$archive" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+		printf '%s\n' "$out"
+		ref="$M_IMAGE"
+		loaded="$(printf '%s\n' "$out" | sed -n 's/^Loaded image: //p' | tail -n 1)"
+		if [ -z "$loaded" ]; then
+			loaded="$(printf '%s\n' "$out" | sed -n 's/^Loaded image(s): //p' | tail -n 1)"
+		fi
+		if [ -n "$loaded" ]; then ref="$loaded"; fi
+		if [ -z "$ref" ]; then
+			echo "image loaded, but the reference could not be determined" >&2
+			return 1
+		fi
+		echo "image ready: $ref"
+		echo "this archive holds an image only; start a container with:"
+		echo "  $engine run -d --name <name> $ref"
+		notify_ok "Imported image $ref"
+		return 0
+	fi
+
+	base="${opt_name:-${M_CONTAINER:-}}"
+	if [ -z "$base" ]; then
+		base="$(basename "$archive" .tar)"
+		base="${base%.tar}"
+	fi
+	container="$base"
+	# Check for the name clash before importing, so a refused import leaves no
+	# stray image behind.
+	if engine_has_container "$engine" "$container"; then
+		if [ "$replace" -eq 1 ]; then
+			engine_rm "$engine" "$container" || true
+			echo "removed existing container $container"
+		else
+			echo "a container named $container already exists; use --replace or --name <other>" >&2
+			return 1
+		fi
+	fi
+	image_name="podroid-import/$(safe_name "$base"):$(date +%Y%m%d-%H%M%S)"
+	if ! engine_import "$engine" "$archive" "$image_name" >/dev/null; then
+		echo "import failed: $archive" >&2
+		notify_err "Import failed for $archive"
+		return 1
+	fi
+	echo "imported filesystem -> $image_name"
+
+	# Without metadata there is no start command. Creating a container that can
+	# never start would just leave junk behind, so hand back the image instead.
+	if [ -z "$M_CMD" ] && [ -z "$M_ENTRY" ]; then
+		echo "no metadata: the filesystem is restored, but env vars, ports and the"
+		echo "start command of the original container are unknown. Start it with:"
+		echo "  $engine run -d --name <name> $image_name <command...>"
+		notify_ok "Imported filesystem $image_name (no metadata)"
+		return 0
+	fi
+
+	set -- --name "$container"
+	if [ "$start_it" -eq 1 ]; then
+		set -- "$@" --detach
+	fi
+	if [ -n "$M_RESTART" ] && [ "$M_RESTART" != "no" ]; then
+		set -- "$@" --restart "$M_RESTART"
+	fi
+	if [ -n "$M_NETWORK" ] && [ "$M_NETWORK" != "bridge" ] && [ "$M_NETWORK" != "default" ]; then
+		set -- "$@" --network "$M_NETWORK"
+	fi
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		set -- "$@" --env "$line"
+	done <<EOF
+$M_ENVS
+EOF
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		ip="$(printf '%s' "$line" | cut -d'|' -f1)"
+		hp="$(printf '%s' "$line" | cut -d'|' -f2)"
+		cp="$(printf '%s' "$line" | cut -d'|' -f3)"
+		[ -n "$hp" ] || continue
+		[ -n "$cp" ] || continue
+		if [ -n "$ip" ] && [ "$ip" != "0.0.0.0" ] && [ "$ip" != "::" ]; then
+			set -- "$@" --publish "$ip:$hp:$cp"
+		else
+			set -- "$@" --publish "$hp:$cp"
+		fi
+	done <<EOF
+$M_PUBS
+EOF
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		src="$(printf '%s' "$line" | cut -d'|' -f1)"
+		dst="$(printf '%s' "$line" | cut -d'|' -f2)"
+		[ -n "$src" ] || continue
+		[ -n "$dst" ] || continue
+		if [ ! -e "$src" ]; then
+			# A bind source from the old phone may simply not exist here yet;
+			# create an empty directory so the container can start.
+			if mkdir -p "$src" 2>/dev/null; then
+				echo "created bind source $src"
+			fi
+		fi
+		set -- "$@" --volume "$src:$dst"
+	done <<EOF
+$M_VOLS
+EOF
+	# `--entrypoint` accepts one word only; a multi-word entrypoint was captured
+	# as image metadata in the export and cannot be replayed here.
+	entry_words="$(printf '%s' "$M_ENTRY" | grep -c . || true)"
+	if [ "$entry_words" = "1" ]; then
+		set -- "$@" --entrypoint "$(printf '%s' "$M_ENTRY" | head -n 1)"
+	elif [ "$entry_words" -gt 1 ] 2>/dev/null; then
+		echo "note: multi-word entrypoint not replayed; relying on the imported filesystem"
+	fi
+	set -- "$@" "$image_name"
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		set -- "$@" "$line"
+	done <<EOF
+$M_CMD
+EOF
+
+	if [ "$start_it" -eq 1 ]; then
+		if engine_run "$engine" "$@" >/dev/null; then
+			echo "container $container started ($engine)"
+			notify_ok "Restored container $container"
+		else
+			echo "container $container was created but failed to start; check: $engine logs $container" >&2
+			notify_err "Restored $container but it failed to start"
+			return 1
+		fi
+	else
+		if engine_create "$engine" "$@" >/dev/null; then
+			echo "container $container created (not started)"
+		else
+			echo "failed to create container $container" >&2
+			return 1
+		fi
+	fi
+	return 0
 }
 
 main() {
@@ -258,6 +654,11 @@ main() {
 			cmd_save "$2" "${3:-}"
 			;;
 		all)    cmd_all ;;
+		import)
+			[ $# -ge 2 ] || { usage; return 2; }
+			shift
+			cmd_import "$@"
+			;;
 		-h|--help|help|"") usage ;;
 		*) echo "unknown command: $1" >&2; usage; return 2 ;;
 	esac
