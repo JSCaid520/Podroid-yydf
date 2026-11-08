@@ -13,11 +13,18 @@
  * out docked to the right edge (a little above the middle) so it never sits in
  * the way of the content underneath.
  *
- * Idle behaviour: a few seconds without a touch and the ball slides most of the
- * way off the docked edge, leaving a [PEEK_SLIVER_DP] strip on screen. A 44dp
- * circle parked over a fullscreen video is an obstruction; a thin edge strip is
- * not. Tapping the strip brings the whole ball back - that tap does not open the
- * panel, so the gesture always means "show me the ball again".
+ * Idle behaviour: a few seconds without a touch and the window shrinks from the
+ * 44dp ball down to a [PEEK_SLIVER_DP] tab pinned to the docked edge (the ball
+ * view is hidden, so the window itself becomes 14dp wide). A 44dp circle parked
+ * over a fullscreen video is an obstruction; a thin edge strip is not. Tapping
+ * the strip brings the whole ball back - that tap does not open the panel, so
+ * the gesture always means "show me the ball again".
+ *
+ * The window shrinks rather than sliding off the display: several ROMs clamp
+ * overlay windows back inside the screen bounds, which silently turns
+ * "x = screenWidth - 14dp" into a no-op (field report on v1.3.0-9: the ball
+ * never moved). A 14dp window that sits at screenWidth - 14dp is fully on
+ * screen, so nothing can clamp it away.
  */
 package com.excp.podroid.service
 
@@ -94,6 +101,8 @@ class OverlayBubble(
     private var root: LinearLayout? = null
     private var panel: LinearLayout? = null
     private var ball: TextView? = null
+    /** The "crack" shown while peeking: a narrow tab, the only visible child then. */
+    private var tab: TextView? = null
     private var status: TextView? = null
     private var expanded = false
 
@@ -170,6 +179,7 @@ class OverlayBubble(
         root = null
         panel = null
         ball = null
+        tab = null
         status = null
         params = null
         expanded = false
@@ -225,16 +235,35 @@ class OverlayBubble(
         }
         ball = ballView
 
+        val tabView = TextView(context).apply {
+            visibility = View.GONE
+            // A rounded bar rather than a squashed circle: at 14dp wide the
+            // ball's oval background would read as a stray speck, while a bar
+            // looks like something you can grab.
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(7).toFloat()
+                setColor(BALL_BG)
+            }
+            layoutParams = LinearLayout.LayoutParams(dp(PEEK_SLIVER_DP), dp(BALL_DP))
+            isClickable = true
+            setOnTouchListener(dragAndTap())
+        }
+        tab = tabView
+
         return LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             // Panel first: docked on the right edge (the default) it opens
-            // leftwards. orderPanelForDock() flips the two when the ball has
-            // been dragged to the left edge.
+            // leftwards. orderPanelForDock() re-sorts these three when the ball
+            // has been dragged to the left edge, and keeps the tab on the
+            // outside so a peeking window (tab only, 14dp wide) still lines up
+            // with the edge it is docked to.
             addView(panelView)
             addView(ballView, LinearLayout.LayoutParams(dp(BALL_DP), dp(BALL_DP)).apply {
                 marginStart = dp(BALL_MARGIN_DP)
             })
+            addView(tabView)
         }
     }
 
@@ -352,33 +381,61 @@ class OverlayBubble(
     }
 
     /**
-     * Slides the ball most of the way off its docked edge. Only [PEEK_SLIVER_DP]
-     * stays on screen, so a fullscreen video is barely touched while the ball
-     * still advertises itself as a grabbable strip.
+     * Shrinks the window down to the 14dp [tab] pinned at the docked edge.
+     *
+     * This used to slide the whole window mostly off-screen (x = screenWidth -
+     * sliver). On at least one ROM that is a no-op: the window manager clamps an
+     * overlay back inside the display, so the ball never moved. Here nothing
+     * ever leaves the screen - the ball and panel go GONE, the tab becomes the
+     * only child, and the wrap-content window measures 14dp. The tab is laid out
+     * on the outside of the row, so x = screenWidth - 14dp puts it exactly in
+     * the corner it was docked to.
      */
     private fun peekToEdge() {
         val view = root ?: return
         if (expanded || peeked) return
-        val sliver = dp(PEEK_SLIVER_DP)
-        val metrics = context.resources.displayMetrics
-        val width = if (view.width > 0) view.width else dp(BALL_DP + BALL_MARGIN_DP)
+        val ballView = ball ?: return
+        val tabView = tab ?: return
         val p = params ?: return
-        p.x = if (dockedLeft) -(width - sliver) else (metrics.widthPixels - sliver)
+        val metrics = context.resources.displayMetrics
+        val sliver = dp(PEEK_SLIVER_DP)
         peeked = true
+        panel?.visibility = View.GONE
+        ballView.visibility = View.GONE
+        tabView.visibility = View.VISIBLE
+        p.x = if (dockedLeft) 0 else (metrics.widthPixels - sliver).coerceAtLeast(0)
+        p.y = p.y.coerceIn(0, (metrics.heightPixels - dp(BALL_DP)).coerceAtLeast(0))
         runCatching { windowManager.updateViewLayout(view, p) }
+            .onSuccess { Log.i(TAG, "peeked: docked=${if (dockedLeft) "left" else "right"} x=${p.x}") }
+            .onFailure { Log.w(TAG, "peek update failed", it) }
     }
 
     /** Brings the whole ball back. Returns true when it actually was peeking. */
     private fun unpeek(): Boolean {
         if (!peeked) return false
+        peeked = false
+        val tabView = tab
+        val ballView = ball
+        tabView?.visibility = View.GONE
+        ballView?.visibility = View.VISIBLE
         val view = root
         val p = params
-        peeked = false
         if (view == null || p == null) return true
         val metrics = context.resources.displayMetrics
-        val width = if (view.width > 0) view.width else dp(BALL_DP + BALL_MARGIN_DP)
-        p.x = if (dockedLeft) 0 else (metrics.widthPixels - width).coerceAtLeast(0)
+        // Use the width the window is about to have, not view.width: until the
+        // next layout pass that still reports the 14dp tab, and a stale x here
+        // would also poison the drag anchor sampled right after this returns.
+        val dockWidth = dp(BALL_DP + BALL_MARGIN_DP)
+        p.x = if (dockedLeft) 0 else (metrics.widthPixels - dockWidth).coerceAtLeast(0)
+        p.y = p.y.coerceIn(0, (metrics.heightPixels - dp(BALL_DP)).coerceAtLeast(0))
         runCatching { windowManager.updateViewLayout(view, p) }
+            .onSuccess { Log.i(TAG, "unpeeked: x=${p.x}") }
+            .onFailure { Log.w(TAG, "unpeek update failed", it) }
+        // Re-arm here, not only in the ACTION_UP branch: restoring the ball swaps
+        // which view owns the gesture, so the matching ACTION_UP may never be
+        // delivered to us. Without this the ball could stay fully visible
+        // forever after a tap on the strip.
+        schedulePeek()
         return true
     }
 
@@ -391,15 +448,23 @@ class OverlayBubble(
         val container = root ?: return
         val panelView = panel ?: return
         val ballView = ball ?: return
-        val ballIsFirst = container.getChildAt(0) === ballView
-        if (ballIsFirst == dockedLeft) return
+        val tabView = tab ?: return
+        val current = (0 until container.childCount).map { container.getChildAt(it) }
+        val desired = if (dockedLeft) {
+            listOf(tabView, ballView, panelView)
+        } else {
+            listOf(panelView, ballView, tabView)
+        }
+        if (current == desired) return
         container.removeAllViews()
         if (dockedLeft) {
+            container.addView(tabView)
             container.addView(ballView, ballLayoutParams(0))
             container.addView(panelView)
         } else {
             container.addView(panelView)
             container.addView(ballView, ballLayoutParams(dp(BALL_MARGIN_DP)))
+            container.addView(tabView)
         }
     }
 
