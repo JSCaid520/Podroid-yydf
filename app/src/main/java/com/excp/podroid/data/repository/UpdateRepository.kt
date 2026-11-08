@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.io.File
 import java.net.URL
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -18,6 +19,20 @@ import javax.inject.Singleton
 data class UpdateInfo(
     val latestVersion: String,
     val releaseUrl: String,
+)
+
+/**
+ * A published APK of *our* fork, already resolved to a single download URL.
+ *
+ * [version] is the tag with the leading `v` stripped (`1.3.0-9`) — it is what the
+ * Settings dialog shows and what [isNewerOwn] compares against
+ * [com.excp.podroid.BuildConfig.VERSION_NAME].
+ */
+data class ApkRelease(
+    val version: String,
+    val tag: String,
+    val downloadUrl: String,
+    val sizeBytes: Long,
 )
 
 /**
@@ -117,6 +132,35 @@ private fun comparePrerelease(a: String, b: String): Int {
     return 0
 }
 
+/**
+ * Version comparison for *our own* release tags (`v1.3.0-<run_number>`).
+ *
+ * Differs from [isNewer] on exactly one point: for us a build suffix means "a
+ * later build of the same version", so `1.3.0-9` is NEWER than `1.3.0` —
+ * whereas upstream's `1.2.0-rc1` is older than `1.2.0`. Without this, the first
+ * build of a version would rank below the very release it replaces and the
+ * in-app updater would never fire.
+ */
+internal fun isNewerOwn(latest: String, current: String): Boolean {
+    fun core(v: String) = v.substringBefore("-").split(".").map { it.toIntOrNull() ?: 0 }
+    val l = core(latest)
+    val c = core(current)
+    for (i in 0 until maxOf(l.size, c.size)) {
+        val lv = l.getOrElse(i) { 0 }
+        val cv = c.getOrElse(i) { 0 }
+        if (lv > cv) return true
+        if (lv < cv) return false
+    }
+    val ls = latest.substringAfter("-", "")
+    val cs = current.substringAfter("-", "")
+    return when {
+        ls == cs -> false
+        ls.isEmpty() -> false  // a bare "1.3.0" is never newer than a later build of it
+        cs.isEmpty() -> true   // "1.3.0-9" supersedes the bare "1.3.0"
+        else -> comparePrerelease(ls, cs) > 0
+    }
+}
+
 @Singleton
 class UpdateRepository @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -205,5 +249,174 @@ class UpdateRepository @Inject constructor(
 
     suspend fun dismissUpdate(version: String) {
         context.dataStore.edit { it[dismissedKey] = version }
+    }
+
+    // ── In-app update from OUR OWN releases ──────────────────────────────────
+    // Kept strictly separate from [checkForUpdate]: that one asks upstream
+    // "is there a newer Podroid?" and only ever opens a browser. This one asks
+    // "is there a newer build of ours?" and is the only feed the installer may
+    // use. Pointing the silent startup check at our fork would nag every user
+    // of an upstream build, so this path is manual-only (Settings → Check for
+    // updates) and is not gated by the 24h cache.
+
+    private val ownReleaseApi = "https://api.github.com/repos/yydfys/Podroid/releases/latest"
+
+    /**
+     * Mirrors tried in order for the APK body; "" means github.com directly.
+     * Release downloads are frequently unroutable from mainland China, and one
+     * dead mirror must not cost the whole download — each attempt restarts at
+     * byte 0 into a fresh `.part` file.
+     */
+    private val apkDownloadMirrors = listOf("https://gh-proxy.com/", "https://ghproxy.net/", "")
+
+    private val userAgent = "Podroid-Android"
+
+    /**
+     * Manual check against our own release feed.
+     *
+     * Returns null when nothing newer is published *or* the request failed; the
+     * caller renders "up to date", and a failed manual check must never look
+     * like an available update.
+     */
+    suspend fun checkOwnRelease(currentVersion: String): ApkRelease? = withContext(Dispatchers.IO) {
+        var connection: java.net.HttpURLConnection? = null
+        try {
+            connection = URL(ownReleaseApi).openConnection() as java.net.HttpURLConnection
+            connection.connectTimeout = 8000
+            connection.readTimeout = 8000
+            connection.setRequestProperty("Accept", "application/vnd.github+json")
+            connection.setRequestProperty("User-Agent", userAgent)
+
+            if (connection.responseCode !in 200..299) {
+                // Drain the error body so the socket can be closed cleanly.
+                runCatching { connection.errorStream?.bufferedReader()?.use { it.readText() } }
+                return@withContext null
+            }
+
+            val obj = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+            if (obj.optBoolean("prerelease", false) || obj.optBoolean("draft", false)) {
+                return@withContext null
+            }
+
+            val tag = obj.optString("tag_name", "")
+            val version = tag.removePrefix("v")
+            if (version.isEmpty()) return@withContext null
+            if (!isNewerOwn(version, currentVersion.removeSuffix("-debug"))) return@withContext null
+
+            val assets = obj.optJSONArray("assets") ?: return@withContext null
+            // Prefer the signed "-release.apk"; fall back to the first .apk so a
+            // future rename in CI degrades to "still works" instead of "no update".
+            var chosen: JSONObject? = null
+            for (i in 0 until assets.length()) {
+                val asset = assets.optJSONObject(i) ?: continue
+                val name = asset.optString("name", "")
+                if (!name.endsWith(".apk", ignoreCase = true)) continue
+                if (asset.optString("browser_download_url", "").isEmpty()) continue
+                if (chosen == null) chosen = asset
+                if (name.endsWith("-release.apk", ignoreCase = true)) {
+                    chosen = asset
+                    break
+                }
+            }
+            val asset = chosen ?: return@withContext null
+            return@withContext ApkRelease(
+                version = version,
+                tag = tag,
+                downloadUrl = asset.optString("browser_download_url", ""),
+                sizeBytes = asset.optLong("size", 0L),
+            )
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (e: Exception) {
+            android.util.Log.w("UpdateRepository", "own release check failed", e)
+            null
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
+    /**
+     * Downloads [release] into `filesDir/updates` and returns the APK, ready to
+     * be handed to the system package installer. Progress is 0..100.
+     *
+     * The body goes to a `.part` file and is renamed into place only after a zip
+     * header check, so a truncated mirror response (or an HTML error page) can
+     * never reach the installer looking like a valid APK.
+     */
+    suspend fun downloadApk(
+        release: ApkRelease,
+        onProgress: (Int) -> Unit,
+    ): File = withContext(Dispatchers.IO) {
+        val dir = File(context.filesDir, "updates").apply { mkdirs() }
+        val target = File(dir, "podroid-${release.version}.apk")
+        var lastError: Exception? = null
+
+        for (mirror in apkDownloadMirrors) {
+            val partial = File(dir, "${target.name}.part")
+            var connection: java.net.HttpURLConnection? = null
+            try {
+                connection = URL(mirror + release.downloadUrl).openConnection() as java.net.HttpURLConnection
+                connection.connectTimeout = 15000
+                connection.readTimeout = 30000
+                connection.instanceFollowRedirects = true
+                connection.setRequestProperty("User-Agent", userAgent)
+
+                val code = connection.responseCode
+                if (code !in 200..299) {
+                    runCatching { connection.errorStream?.bufferedReader()?.use { it.readText() } }
+                    throw java.io.IOException("HTTP $code")
+                }
+
+                // Trust the response length when present, the asset metadata otherwise.
+                val total = connection.contentLengthLong.takeIf { it > 0L } ?: release.sizeBytes
+                var copied = 0L
+                var lastPercent = -1
+                connection.inputStream.use { input ->
+                    partial.outputStream().use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            output.write(buffer, 0, read)
+                            copied += read
+                            if (total > 0L) {
+                                val percent = (copied * 100 / total).toInt().coerceIn(0, 100)
+                                if (percent != lastPercent) {
+                                    lastPercent = percent
+                                    onProgress(percent)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // A release APK is ~300 MB; anything tiny, or not a zip at all,
+                // is a failed download rather than something to install.
+                if (copied < 1_000_000L) throw java.io.IOException("truncated download ($copied bytes)")
+                val header = partial.inputStream().use { stream ->
+                    val bytes = ByteArray(2)
+                    stream.read(bytes)
+                    bytes
+                }
+                if (header[0] != 'P'.code.toByte() || header[1] != 'K'.code.toByte()) {
+                    throw java.io.IOException("not an APK")
+                }
+
+                if (target.exists()) target.delete()
+                if (!partial.renameTo(target)) throw java.io.IOException("cannot move APK into place")
+                onProgress(100)
+                return@withContext target
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                runCatching { partial.delete() }
+                throw c
+            } catch (e: Exception) {
+                lastError = e
+                android.util.Log.w("UpdateRepository", "APK download from '$mirror' failed", e)
+                runCatching { partial.delete() }
+            } finally {
+                connection?.disconnect()
+            }
+        }
+        throw lastError ?: java.io.IOException("download failed")
     }
 }

@@ -16,10 +16,12 @@ import androidx.lifecycle.viewModelScope
 import com.excp.podroid.BuildConfig
 import com.excp.podroid.R
 import com.excp.podroid.data.repository.AddRuleResult
+import com.excp.podroid.data.repository.ApkRelease
 import com.excp.podroid.data.repository.LanguageManager
 import com.excp.podroid.data.repository.PortForwardRepository
 import com.excp.podroid.data.repository.PortForwardRule
 import com.excp.podroid.data.repository.SettingsRepository
+import com.excp.podroid.data.repository.UpdateRepository
 import com.excp.podroid.di.ApplicationScope
 import com.excp.podroid.engine.EngineHolder
 import com.excp.podroid.engine.EngineSelection
@@ -28,8 +30,10 @@ import com.excp.podroid.util.DeviceResourcePolicy
 import com.excp.podroid.util.NetworkUtils
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -69,6 +73,22 @@ data class SettingsUiState(
     val overlayBubbleEnabled: Boolean = true,
 )
 
+/**
+ * What the in-app updater is currently doing. One state, one dialog: the
+ * Settings screen renders exactly one of these at a time, so a download can
+ * never end up with two competing prompts.
+ */
+sealed interface UpdateUiState {
+    data object Idle : UpdateUiState
+    data object Checking : UpdateUiState
+    /** Nothing newer published (also covers a failed check — see checkOwnUpdate). */
+    data object UpToDate : UpdateUiState
+    data class Available(val release: ApkRelease) : UpdateUiState
+    data class Downloading(val percent: Int, val release: ApkRelease) : UpdateUiState
+    data class Ready(val apk: File, val release: ApkRelease) : UpdateUiState
+    data class Failed(val message: String) : UpdateUiState
+}
+
 // Typed intermediates for the three sub-combines below, so a reordered flow
 // is a compile error instead of a silently cross-wired setting (the previous
 // arrayOf<Any> packing cast back by index).
@@ -103,6 +123,7 @@ class SettingsViewModel @Inject constructor(
     private val engine: EngineHolder,
     private val languageManager: LanguageManager,
     @ApplicationScope private val externalScope: CoroutineScope,
+    private val updateRepository: UpdateRepository,
 ) : ViewModel() {
 
     /**
@@ -355,6 +376,67 @@ class SettingsViewModel @Inject constructor(
     val portForwardPartialWarning: StateFlow<String?> = _portForwardPartialWarning.asStateFlow()
 
     fun clearPortForwardPartialWarning() { _portForwardPartialWarning.value = null }
+
+    // ── In-app update (our own releases) ─────────────────────────────────────
+    // Manual only: the user taps "Check for updates" in Settings → About. The
+    // silent startup prompt still points at upstream, so nothing here changes
+    // behaviour for anyone who never taps that button.
+
+    private val _updateState = MutableStateFlow<UpdateUiState>(UpdateUiState.Idle)
+    /** Drives the check → download → install dialogs in Settings. */
+    val updateState: StateFlow<UpdateUiState> = _updateState.asStateFlow()
+
+    private var updateJob: Job? = null
+
+    fun checkOwnUpdate() {
+        // Ignore re-taps while a check or download is already running; a download
+        // in particular must not be restarted by an impatient double tap.
+        val current = _updateState.value
+        if (current is UpdateUiState.Checking || current is UpdateUiState.Downloading) return
+        updateJob?.cancel()
+        _updateState.value = UpdateUiState.Checking
+        updateJob = viewModelScope.launch {
+            val release = runCatching {
+                updateRepository.checkOwnRelease(BuildConfig.VERSION_NAME)
+            }.getOrNull()
+            _updateState.value = if (release == null) {
+                UpdateUiState.UpToDate
+            } else {
+                UpdateUiState.Available(release)
+            }
+        }
+    }
+
+    fun downloadUpdate(release: ApkRelease) {
+        if (_updateState.value is UpdateUiState.Downloading) return
+        updateJob?.cancel()
+        _updateState.value = UpdateUiState.Downloading(0, release)
+        updateJob = viewModelScope.launch {
+            try {
+                val apk = updateRepository.downloadApk(release) { percent ->
+                    _updateState.value = UpdateUiState.Downloading(percent, release)
+                }
+                _updateState.value = UpdateUiState.Ready(apk, release)
+            } catch (c: CancellationException) {
+                throw c
+            } catch (e: Exception) {
+                Log.w(TAG, "update download failed", e)
+                _updateState.value = UpdateUiState.Failed(
+                    e.message ?: context.getString(R.string.unknown_error),
+                )
+            }
+        }
+    }
+
+    /**
+     * Returns the UI to idle after a dialog was handled or dismissed. Refuses
+     * while a download is in flight: the dialog is the only progress indicator,
+     * and the download itself lives in [viewModelScope].
+     */
+    fun clearUpdateState() {
+        if (_updateState.value is UpdateUiState.Downloading) return
+        _updateState.value = UpdateUiState.Idle
+    }
 
     fun removePortForward(rule: PortForwardRule) {
         viewModelScope.launch { portForwardRepository.removeRule(rule) }

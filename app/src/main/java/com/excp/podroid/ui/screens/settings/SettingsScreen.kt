@@ -33,6 +33,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -95,6 +96,8 @@ import com.excp.podroid.ui.components.PodroidSwitch
 import com.excp.podroid.ui.components.PodroidTopBar
 import com.excp.podroid.ui.theme.PodroidTokens
 import com.excp.podroid.data.repository.LanguageManager
+import com.excp.podroid.util.ApkInstaller
+import java.util.Locale
 
 @Composable
 private fun languageDisplayName(language: String, systemDefaultLanguage: String): String {
@@ -122,6 +125,7 @@ fun SettingsScreen(
     val portForwardPartialWarning by viewModel.portForwardPartialWarning.collectAsStateWithLifecycle()
     val usbPassthrough by viewModel.usbPassthroughEnabled.collectAsStateWithLifecycle()
     val autostartOnBoot by viewModel.autostartOnBoot.collectAsStateWithLifecycle()
+    val updateState by viewModel.updateState.collectAsStateWithLifecycle()
 
     // rememberSaveable: changing the language calls activity.recreate(), which
     // would otherwise silently close any open dialog and collapse Advanced.
@@ -192,6 +196,14 @@ fun SettingsScreen(
         val msg = portForwardPartialWarning ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(msg)
         viewModel.clearPortForwardPartialWarning()
+    }
+    // "Up to date" has no dialog — a snackbar is enough, and the state must be
+    // consumed so the next tap on Check for updates actually re-runs.
+    LaunchedEffect(updateState) {
+        if (updateState is UpdateUiState.UpToDate) {
+            snackbarHostState.showSnackbar(ctx.getString(R.string.update_up_to_date))
+            viewModel.clearUpdateState()
+        }
     }
 
     Scaffold(
@@ -394,6 +406,8 @@ fun SettingsScreen(
                     avfRunning = avfRunning,
                     onRunAvfDiagnostic = runAvfDiagnostic,
                     onExportLogs = { viewModel.exportConsoleLogs() },
+                    onCheckUpdate = viewModel::checkOwnUpdate,
+                    updateInProgress = updateState is UpdateUiState.Checking,
                 )
 
                 Spacer(Modifier.height(PodroidTokens.Spacing.XL2))
@@ -446,7 +460,102 @@ fun SettingsScreen(
             onDismiss = { showLanguageDialog = false },
         )
     }
+
+    // One dialog driven by the updater state machine. Downloading deliberately
+    // cannot be dismissed: the transfer runs in viewModelScope, so closing the
+    // dialog would leave the user with no progress feedback at all.
+    when (val update = updateState) {
+        is UpdateUiState.Available -> AlertDialog(
+            onDismissRequest = viewModel::clearUpdateState,
+            title = { Text(stringResource(R.string.update_available_title, update.release.version)) },
+            text = {
+                Text(
+                    stringResource(
+                        R.string.update_available_body,
+                        BuildConfig.VERSION_NAME,
+                        formatDownloadSize(update.release.sizeBytes),
+                    ),
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.downloadUpdate(update.release) }) {
+                    Text(stringResource(R.string.update_download))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::clearUpdateState) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
+
+        is UpdateUiState.Downloading -> AlertDialog(
+            onDismissRequest = {},
+            title = { Text(stringResource(R.string.update_downloading_title)) },
+            text = {
+                Column {
+                    LinearProgressIndicator(
+                        progress = { update.percent / 100f },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(PodroidTokens.Spacing.SM))
+                    Text(
+                        text = stringResource(R.string.update_downloading, update.percent),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {},
+        )
+
+        is UpdateUiState.Ready -> AlertDialog(
+            onDismissRequest = viewModel::clearUpdateState,
+            title = { Text(stringResource(R.string.update_ready_title)) },
+            text = { Text(stringResource(R.string.update_ready_body, update.release.version)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    val started = ApkInstaller.install(ctx, update.apk)
+                    viewModel.clearUpdateState()
+                    if (!started) {
+                        // The system's "install unknown apps" screen was opened
+                        // instead; the APK stays on disk, so a retry needs no
+                        // re-download.
+                        avfScope.launch {
+                            snackbarHostState.showSnackbar(
+                                ctx.getString(R.string.update_install_permission_needed),
+                            )
+                        }
+                    }
+                }) {
+                    Text(stringResource(R.string.update_install))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::clearUpdateState) {
+                    Text(stringResource(R.string.update_later))
+                }
+            },
+        )
+
+        is UpdateUiState.Failed -> AlertDialog(
+            onDismissRequest = viewModel::clearUpdateState,
+            title = { Text(stringResource(R.string.update_failed_title)) },
+            text = { Text(stringResource(R.string.update_failed_body, update.message)) },
+            confirmButton = {
+                TextButton(onClick = viewModel::clearUpdateState) {
+                    Text(stringResource(R.string.close))
+                }
+            },
+        )
+
+        else -> Unit
+    }
 }
+
+/** Renders the release asset size for the download prompt; 0 = GitHub omitted it. */
+private fun formatDownloadSize(bytes: Long): String =
+    if (bytes <= 0L) "—" else String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
 
 @Composable
 private fun AppearanceSection(
@@ -602,6 +711,8 @@ private fun AboutSection(
     avfRunning: Boolean,
     onRunAvfDiagnostic: () -> Unit,
     onExportLogs: () -> Unit,
+    onCheckUpdate: () -> Unit,
+    updateInProgress: Boolean,
 ) {
     PodroidSectionLabel(stringResource(R.string.about))
     PodroidListRow(label = stringResource(R.string.version_label), value = "v${BuildConfig.VERSION_NAME}", mono = true)
@@ -613,6 +724,16 @@ private fun AboutSection(
     PodroidGhostButton(
         text = stringResource(R.string.documentation),
         onClick = { uriHandler.openUri("https://extv.github.io/Podroid/guide/") },
+    )
+    Spacer(Modifier.height(PodroidTokens.Spacing.SM))
+    // Checks OUR fork's releases (not upstream) and installs the APK in-app.
+    PodroidGhostButton(
+        text = if (updateInProgress) {
+            stringResource(R.string.update_checking)
+        } else {
+            stringResource(R.string.check_for_updates)
+        },
+        onClick = onCheckUpdate,
     )
     Spacer(Modifier.height(PodroidTokens.Spacing.SM))
     PodroidGhostButton(

@@ -24,6 +24,10 @@
     <!-- Terminal bell haptic feedback (used by Termux terminal view) -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- In-app update: hand our own downloaded APK to the system package
+         installer. The install itself is still confirmed by the user. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- Floating status bubble: a tiny always-on-top window that keeps the app
          "visible" to the system while the VM runs in the background, and gives
          quick access to start/stop + forward replay without opening the app -->
