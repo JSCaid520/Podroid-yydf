@@ -643,7 +643,8 @@ class SettingsViewModel @Inject constructor(
         private val APP_LOG_TAGS = listOf(
             "AudioStreamer", "AvfDownloadsShare", "AvfEngine", "AvfReflect",
             "ConsoleFanout", "EngineHolder", "HomeViewModel", "HostRequestServer",
-            "LanguageManager", "Ninep2000LServer", "PodroidApp", "PodroidService",
+            "LanguageManager", "Ninep2000LServer", "PodroidApp", "PodroidOverlay",
+            "PodroidService",
             "PodroidVM-err", "QemuBootMonitor", "QemuEngine", "QmpClient",
             "SettingsViewModel", "TerminalVM", "UpdateRepository", "UsbPassthrough",
             "VmControlReceiver", "VsockControlChannel", "VsockPortForwarder",
