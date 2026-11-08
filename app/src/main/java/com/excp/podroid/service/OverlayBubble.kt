@@ -14,16 +14,17 @@
  * the way of the content underneath.
  *
  * Idle behaviour: a few seconds without a touch and the window shrinks from the
- * 44dp ball down to a [PEEK_SLIVER_DP] tab pinned to the docked edge (the ball
- * view is hidden, so the window itself becomes 14dp wide). A 44dp circle parked
- * over a fullscreen video is an obstruction; a thin edge strip is not. Tapping
- * the strip brings the whole ball back - that tap does not open the panel, so
- * the gesture always means "show me the ball again".
+ * 44dp ball down to a [PEEK_SLIVER_DP] x [PEEK_SLIVER_HEIGHT_DP] tab pinned to
+ * the docked edge (the ball view is hidden, so the window itself becomes 11dp
+ * wide). A 44dp circle parked over a fullscreen video is an obstruction; a thin,
+ * faint edge strip is not. Tapping the strip brings the whole ball back - that
+ * tap does not open the panel, so the gesture always means "show me the ball
+ * again".
  *
  * The window shrinks rather than sliding off the display: several ROMs clamp
  * overlay windows back inside the screen bounds, which silently turns
  * "x = screenWidth - 14dp" into a no-op (field report on v1.3.0-9: the ball
- * never moved). A 14dp window that sits at screenWidth - 14dp is fully on
+ * never moved). An 11dp window that sits at screenWidth - 11dp is fully on
  * screen, so nothing can clamp it away.
  */
 package com.excp.podroid.service
@@ -80,8 +81,18 @@ class OverlayBubble(
         /** Idle time before the ball slides off the edge, in milliseconds. */
         const val AUTO_PEEK_DELAY_MS = 4_000L
 
-        /** How much of the ball stays on screen while peeking (a tappable tab). */
-        const val PEEK_SLIVER_DP = 14
+        /**
+         * The peeking tab: narrower than the ball so it reads as a sliver at the
+         * edge rather than a second widget.
+         */
+        const val PEEK_SLIVER_DP = 11
+
+        /**
+         * Peeking tab height. Shorter than [BALL_DP] on purpose - the tab is a
+         * faint hint that something is docked there, not a button competing with
+         * the content underneath.
+         */
+        const val PEEK_SLIVER_HEIGHT_DP = 32
 
         const val ROW_BG = 0x33FFFFFF
 
@@ -92,6 +103,12 @@ class OverlayBubble(
 
         /** Ball background (Podroid blue, ~80% opaque). */
         val BALL_BG = 0xCC2F6FED.toInt()
+
+        /**
+         * Peeking tab background: the same brand blue at ~35% alpha, so it is
+         * only just perceptible against a video or a page ("隐隐约约").
+         */
+        val TAB_BG = 0x592F6FED.toInt()
 
         val FG = 0xFFE6E1E5.toInt()
     }
@@ -259,15 +276,16 @@ class OverlayBubble(
 
         val tabView = TextView(context).apply {
             visibility = View.GONE
-            // A rounded bar rather than a squashed circle: at 14dp wide the
+            // A slim rounded bar rather than a squashed circle: at 11dp wide the
             // ball's oval background would read as a stray speck, while a bar
-            // looks like something you can grab.
+            // looks like the edge of something that is docked there. Kept faint
+            // (see TAB_BG) so it never pulls the eye away from the video/page.
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(7).toFloat()
-                setColor(BALL_BG)
+                cornerRadius = dp(5).toFloat()
+                setColor(TAB_BG)
             }
-            layoutParams = LinearLayout.LayoutParams(dp(PEEK_SLIVER_DP), dp(BALL_DP))
+            layoutParams = LinearLayout.LayoutParams(dp(PEEK_SLIVER_DP), dp(PEEK_SLIVER_HEIGHT_DP))
             isClickable = true
             setOnTouchListener(dragAndTap())
         }
@@ -403,15 +421,22 @@ class OverlayBubble(
     }
 
     /**
-     * Shrinks the window down to the 14dp [tab] pinned at the docked edge.
+     * Shrinks the window down to the [PEEK_SLIVER_DP] x [PEEK_SLIVER_HEIGHT_DP]
+     * [tab] pinned at the docked edge.
      *
      * This used to slide the whole window mostly off-screen (x = screenWidth -
      * sliver). On at least one ROM that is a no-op: the window manager clamps an
      * overlay back inside the display, so the ball never moved. Here nothing
      * ever leaves the screen - the ball and panel go GONE, the tab becomes the
-     * only child, and the wrap-content window measures 14dp. The tab is laid out
-     * on the outside of the row, so x = screenWidth - 14dp puts it exactly in
+     * only child, and the wrap-content window measures 11dp. The tab is laid out
+     * on the outside of the row, so x = screenWidth - 11dp puts it exactly in
      * the corner it was docked to.
+     *
+     * The vertical centre of the ball is kept: the tab is shorter than the ball,
+     * so re-using y would leave it hanging from the ball's top edge. Both
+     * `unpeek()` and this method therefore convert between the two heights
+     * around a fixed centre instead of shifting y by a delta (a delta would
+     * double-apply if the same path ran twice).
      */
     private fun peekToEdge() {
         val view = root ?: return
@@ -421,14 +446,19 @@ class OverlayBubble(
         val p = params ?: return
         val metrics = context.resources.displayMetrics
         val sliver = dp(PEEK_SLIVER_DP)
+        val tabHeight = dp(PEEK_SLIVER_HEIGHT_DP)
+        val ballCenterY = p.y + dp(BALL_DP) / 2
         peeked = true
         panel?.visibility = View.GONE
         ballView.visibility = View.GONE
         tabView.visibility = View.VISIBLE
         p.x = if (dockedLeft) 0 else (metrics.widthPixels - sliver).coerceAtLeast(0)
-        p.y = p.y.coerceIn(0, (metrics.heightPixels - dp(BALL_DP)).coerceAtLeast(0))
+        p.y = (ballCenterY - tabHeight / 2)
+            .coerceIn(0, (metrics.heightPixels - tabHeight).coerceAtLeast(0))
         runCatching { windowManager.updateViewLayout(view, p) }
-            .onSuccess { Log.i(TAG, "peeked: docked=${if (dockedLeft) "left" else "right"} x=${p.x}") }
+            .onSuccess {
+                Log.i(TAG, "peeked: docked=${if (dockedLeft) "left" else "right"} x=${p.x} y=${p.y}")
+            }
             .onFailure { Log.w(TAG, "peek update failed", it) }
     }
 
@@ -445,11 +475,16 @@ class OverlayBubble(
         if (view == null || p == null) return true
         val metrics = context.resources.displayMetrics
         // Use the width the window is about to have, not view.width: until the
-        // next layout pass that still reports the 14dp tab, and a stale x here
+        // next layout pass that still reports the 11dp tab, and a stale x here
         // would also poison the drag anchor sampled right after this returns.
         val dockWidth = dp(BALL_DP + BALL_MARGIN_DP)
+        // Same centre-preserving conversion as peekToEdge(), in reverse: the tab
+        // is shorter than the ball, so the ball must be pulled up by half the
+        // difference or it would keep the tab's top edge.
+        val tabCenterY = p.y + dp(PEEK_SLIVER_HEIGHT_DP) / 2
         p.x = if (dockedLeft) 0 else (metrics.widthPixels - dockWidth).coerceAtLeast(0)
-        p.y = p.y.coerceIn(0, (metrics.heightPixels - dp(BALL_DP)).coerceAtLeast(0))
+        p.y = (tabCenterY - dp(BALL_DP) / 2)
+            .coerceIn(0, (metrics.heightPixels - dp(BALL_DP)).coerceAtLeast(0))
         runCatching { windowManager.updateViewLayout(view, p) }
             .onSuccess { Log.i(TAG, "unpeeked: x=${p.x}") }
             .onFailure { Log.w(TAG, "unpeek update failed", it) }
@@ -540,7 +575,11 @@ class OverlayBubble(
             view.width > 0 -> view.width
             else -> dp(BALL_DP + BALL_MARGIN_DP)
         }
-        val height = if (view.height > 0) view.height else dp(BALL_DP)
+        val height = when {
+            peeked -> dp(PEEK_SLIVER_HEIGHT_DP)
+            view.height > 0 -> view.height
+            else -> dp(BALL_DP)
+        }
         val oldX = p.x
         val oldY = p.y
         p.x = if (dockedLeft) 0 else (metrics.widthPixels - width).coerceAtLeast(0)
