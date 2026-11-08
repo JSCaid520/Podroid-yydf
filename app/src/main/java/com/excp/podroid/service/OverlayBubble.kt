@@ -31,7 +31,9 @@ package com.excp.podroid.service
 import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ComponentCallbacks
 import android.content.Context
+import android.content.res.Configuration
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Handler
@@ -118,6 +120,22 @@ class OverlayBubble(
     private val idleHandler = Handler(Looper.getMainLooper())
     private val peekRunnable = Runnable { peekToEdge() }
 
+    /**
+     * Docking is an absolute x. Rotation changes the screen width underneath a
+     * window that is already placed, so a tab pinned to the right edge in
+     * portrait ended up near the middle of the landscape screen until the next
+     * tap re-docked it. This callback re-applies the docked position whenever
+     * the configuration changes. Registered for exactly as long as the window
+     * exists, so it can never fire against a removed view.
+     */
+    private val configCallbacks = object : ComponentCallbacks {
+        override fun onConfigurationChanged(newConfig: Configuration) {
+            reDockAfterRotation()
+        }
+
+        override fun onLowMemory() = Unit
+    }
+
     fun isShowing(): Boolean = root != null
 
     fun canShow(): Boolean = Settings.canDrawOverlays(context)
@@ -157,6 +175,8 @@ class OverlayBubble(
             windowManager.addView(view, windowParams)
             root = view
             params = windowParams
+            runCatching { context.registerComponentCallbacks(configCallbacks) }
+                .onFailure { Log.w(TAG, "could not register configuration callbacks", it) }
             dockToEdge()
             schedulePeek()
             true
@@ -173,6 +193,8 @@ class OverlayBubble(
         // Cancel first: an idle peek must never fire against a removed window.
         idleHandler.removeCallbacks(peekRunnable)
         peeked = false
+        runCatching { context.unregisterComponentCallbacks(configCallbacks) }
+            .onFailure { Log.w(TAG, "could not unregister configuration callbacks", it) }
         val view = root ?: return
         runCatching { windowManager.removeView(view) }
             .onFailure { Log.w(TAG, "could not remove the overlay view", it) }
@@ -488,6 +510,50 @@ class OverlayBubble(
             p.y = p.y.coerceIn(0, (metrics.heightPixels - view.height).coerceAtLeast(0))
             runCatching { windowManager.updateViewLayout(view, p) }
         }
+    }
+
+    /**
+     * Re-pins the window after the screen rotated (or the display size
+     * otherwise changed). Applied twice: immediately, and once more 300 ms later
+     * in case a ROM reports the new configuration before the display metrics it
+     * hands to this process have settled. Both passes are idempotent - they
+     * recompute x from scratch.
+     */
+    private fun reDockAfterRotation() {
+        val view = root ?: return
+        view.post { applyDockedPosition() }
+        view.postDelayed({ applyDockedPosition() }, 300L)
+    }
+
+    /**
+     * Puts the window back on its docked edge using the *current* screen width.
+     * Works for the expanded panel, the full ball and the peeking tab: each one
+     * has a different width, so it is derived from the state rather than from
+     * [View.getWidth], which still reports the pre-rotation value at this point.
+     */
+    private fun applyDockedPosition() {
+        val view = root ?: return
+        val p = params ?: return
+        val metrics = context.resources.displayMetrics
+        val width = when {
+            peeked -> dp(PEEK_SLIVER_DP)
+            view.width > 0 -> view.width
+            else -> dp(BALL_DP + BALL_MARGIN_DP)
+        }
+        val height = if (view.height > 0) view.height else dp(BALL_DP)
+        val oldX = p.x
+        val oldY = p.y
+        p.x = if (dockedLeft) 0 else (metrics.widthPixels - width).coerceAtLeast(0)
+        p.y = p.y.coerceIn(0, (metrics.heightPixels - height).coerceAtLeast(0))
+        runCatching { windowManager.updateViewLayout(view, p) }
+            .onSuccess {
+                Log.i(
+                    TAG,
+                    "re-docked after rotation: docked=${if (dockedLeft) "left" else "right"} " +
+                        "peeked=$peeked x=$oldX->${p.x} y=$oldY->${p.y} screen=${metrics.widthPixels}x${metrics.heightPixels}",
+                )
+            }
+            .onFailure { Log.w(TAG, "re-dock update failed", it) }
     }
 
     private fun snapToEdge() {
