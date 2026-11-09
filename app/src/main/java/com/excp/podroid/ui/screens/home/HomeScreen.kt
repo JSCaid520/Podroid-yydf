@@ -66,6 +66,7 @@ import com.excp.podroid.ui.components.PermissionRows
 import com.excp.podroid.ui.components.PodroidDestructiveButton
 import com.excp.podroid.ui.components.PodroidGhostButton
 import com.excp.podroid.ui.components.PodroidListRow
+import com.excp.podroid.ui.components.backendLabel
 import com.excp.podroid.ui.components.PodroidPrimaryButton
 import com.excp.podroid.ui.components.PodroidSectionLabel
 import com.excp.podroid.ui.components.PodroidStatus
@@ -103,6 +104,9 @@ fun HomeScreen(
     val avfNetWorkaroundFailed by viewModel.avfNetWorkaroundFailed.collectAsStateWithLifecycle()
     val stopping by viewModel.stopping.collectAsStateWithLifecycle()
     val containerCount by viewModel.containerCount.collectAsStateWithLifecycle()
+    val backendId by viewModel.backendId.collectAsStateWithLifecycle()
+    val engineSelection by viewModel.engineSelection.collectAsStateWithLifecycle()
+    val backendText = backendLabel(engineSelection, backendId)
 
     val isRunning  = vmState is VmState.Running
     val isStarting = vmState is VmState.Starting
@@ -245,7 +249,7 @@ fun HomeScreen(
                             onRetry = { viewModel.restartVm() },
                         )
                         HomeDataSection(
-                            isRunning, isStopping, vmState, meta, phoneIp, containerCount,
+                            isRunning, isStopping, vmState, meta, phoneIp, containerCount, backendText,
                         )
                     }
                     Column(
@@ -306,7 +310,7 @@ fun HomeScreen(
                         onSwitchToQemu = { viewModel.switchToQemuAndRetry() },
                         onRetry = { viewModel.restartVm() },
                     )
-                    HomeDataSection(isRunning, isStopping, vmState, meta, phoneIp, containerCount)
+                    HomeDataSection(isRunning, isStopping, vmState, meta, phoneIp, containerCount, backendText)
                     Spacer(Modifier.weight(1f))
                     HomeActionButtons(
                         isRunning = isRunning,
@@ -571,6 +575,7 @@ private fun HomeDataSection(
     meta: HomeMeta,
     phoneIp: String,
     containerCount: Int?,
+    backendText: String,
 ) {
     val showStarting = vmState is VmState.Starting
     val showError = vmState is VmState.Error
@@ -584,6 +589,7 @@ private fun HomeDataSection(
             mono = true,
         )
         PodroidListRow(label = stringResource(R.string.phone_ip), value = phoneIp, mono = true)
+        PodroidListRow(label = stringResource(R.string.backend), value = backendText, mono = true)
         PodroidListRow(
             label = stringResource(R.string.ssh),
             value = if (meta.sshEnabled) ":${PodroidService.SSH_HOST_PORT} · podroid" else stringResource(R.string.off),
@@ -602,6 +608,7 @@ private fun HomeDataSection(
                 value = formatBootDuration(meta.lastBootDurationMs),
             )
         }
+        PodroidListRow(label = stringResource(R.string.backend), value = backendText, mono = true)
         PodroidListRow(
             label = stringResource(R.string.build),
             value = "v${BuildConfig.VERSION_NAME} · QEMU ${BuildConfig.QEMU_VERSION}",

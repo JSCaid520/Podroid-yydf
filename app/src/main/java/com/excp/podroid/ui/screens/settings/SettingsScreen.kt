@@ -11,6 +11,7 @@ import androidx.activity.result.contract.ActivityResultContracts.RequestPermissi
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -75,6 +76,8 @@ import com.excp.podroid.data.repository.PortForwardRule
 import com.excp.podroid.engine.EngineSelection
 import com.excp.podroid.engine.VmState
 import com.excp.podroid.engine.avf.AvfDiagnostics
+import com.excp.podroid.engine.uml.UmlInfo
+import com.excp.podroid.engine.uml.umlRetryOffered
 import com.excp.podroid.service.PodroidService
 import com.excp.podroid.x11.X11Constants
 import kotlinx.coroutines.Dispatchers
@@ -123,6 +126,7 @@ fun SettingsScreen(
     val vmState by viewModel.vmState.collectAsStateWithLifecycle()
     val exportError by viewModel.exportError.collectAsStateWithLifecycle()
     val portForwardPartialWarning by viewModel.portForwardPartialWarning.collectAsStateWithLifecycle()
+    val umlRetryMessage by viewModel.umlRetryMessage.collectAsStateWithLifecycle()
     val usbPassthrough by viewModel.usbPassthroughEnabled.collectAsStateWithLifecycle()
     val autostartOnBoot by viewModel.autostartOnBoot.collectAsStateWithLifecycle()
     val updateState by viewModel.updateState.collectAsStateWithLifecycle()
@@ -150,6 +154,8 @@ fun SettingsScreen(
     val activeBackendId by viewModel.activeBackendIdFlow.collectAsStateWithLifecycle()
     val isUsbPassthroughAvailable = activeBackendId == "qemu"
     val backendFallback by viewModel.backendFallback.collectAsStateWithLifecycle()
+    val avfUsable by viewModel.avfUsable.collectAsStateWithLifecycle()
+    val umlInfo by viewModel.umlInfo.collectAsStateWithLifecycle()
 
     val runAvfDiagnostic: () -> Unit = {
         if (!avfRunning) {
@@ -210,6 +216,12 @@ fun SettingsScreen(
             snackbarHostState.showSnackbar(ctx.getString(R.string.update_up_to_date))
             viewModel.clearUpdateState()
         }
+    }
+
+    LaunchedEffect(umlRetryMessage) {
+        val msg = umlRetryMessage ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(msg)
+        viewModel.clearUmlRetryMessage()
     }
 
     Scaffold(
@@ -336,7 +348,7 @@ fun SettingsScreen(
                 if (advancedExpanded) {
                     PodroidSectionLabel(stringResource(R.string.backend))
                     Spacer(Modifier.height(PodroidTokens.Spacing.SM))
-                    Row(
+                    FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier.padding(horizontal = PodroidTokens.Spacing.MD),
                     ) {
@@ -351,6 +363,7 @@ fun SettingsScreen(
                                             EngineSelection.AUTO -> stringResource(R.string.auto)
                                             EngineSelection.AVF  -> stringResource(R.string.avf_kvm)
                                             EngineSelection.QEMU -> stringResource(R.string.qemu_tcg)
+                                            EngineSelection.UML  -> stringResource(R.string.backend_uml_experimental)
                                         },
                                         fontFamily = FontFamily.Monospace,
                                     )
@@ -373,6 +386,42 @@ fun SettingsScreen(
                                 ),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(horizontal = PodroidTokens.Spacing.MD),
+                            )
+                        }
+                    } else if (ui.engineSelection == EngineSelection.UML) {
+                        // UML failed its probe, or was demoted after misbehaving: say why
+                        // the VM is running elsewhere and offer a retry.
+                        backendFallback?.let { reasonResId ->
+                            Spacer(Modifier.height(PodroidTokens.Spacing.XS))
+                            Text(
+                                text = stringResource(reasonResId),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(horizontal = PodroidTokens.Spacing.MD),
+                            )
+                        }
+                        if (umlRetryOffered(umlInfo.status)) {
+                            umlInfo.reason?.let { reason ->
+                                Text(
+                                    text = stringResource(R.string.uml_reason_detail, reason),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = PodroidTokens.Spacing.MD),
+                                )
+                            }
+                            Spacer(Modifier.height(PodroidTokens.Spacing.XS))
+                            PodroidGhostButton(
+                                text = stringResource(R.string.uml_try_again),
+                                onClick = viewModel::retryUml,
+                            )
+                        }
+                        if (avfUsable) {
+                            Spacer(Modifier.height(PodroidTokens.Spacing.XS))
+                            Text(
+                                text = stringResource(R.string.backend_uml_avf_better_note),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(horizontal = PodroidTokens.Spacing.MD),
                             )
                         }
@@ -400,6 +449,7 @@ fun SettingsScreen(
                         onQemuReset = viewModel::resetQemuExtraArgs,
                         onKernelReset = viewModel::resetKernelExtraCmdline,
                         enabled = vmNotRunning,
+                        umlActive = activeBackendId == "uml",
                     )
                 }
 
@@ -414,6 +464,7 @@ fun SettingsScreen(
                     onExportLogs = { viewModel.exportConsoleLogs() },
                     onCheckUpdate = viewModel::checkOwnUpdate,
                     updateInProgress = updateState is UpdateUiState.Checking,
+                    umlInfo = umlInfo.takeIf { ui.engineSelection == EngineSelection.UML },
                 )
 
                 Spacer(Modifier.height(PodroidTokens.Spacing.XL2))
@@ -719,6 +770,7 @@ private fun AboutSection(
     onExportLogs: () -> Unit,
     onCheckUpdate: () -> Unit,
     updateInProgress: Boolean,
+    umlInfo: UmlInfo?,
 ) {
     PodroidSectionLabel(stringResource(R.string.about))
     PodroidListRow(label = stringResource(R.string.version_label), value = "v${BuildConfig.VERSION_NAME}", mono = true)
@@ -746,6 +798,16 @@ private fun AboutSection(
         text = stringResource(R.string.export_diagnostic_log),
         onClick = onExportLogs,
     )
+    if (umlInfo != null) {
+        val status = umlInfo.status.name.lowercase()
+        Text(
+            text = umlInfo.reason?.let { stringResource(R.string.uml_diag_status_reason, status, it) }
+                ?: stringResource(R.string.uml_diag_status, status),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = PodroidTokens.Spacing.MD),
+        )
+    }
     Spacer(Modifier.height(PodroidTokens.Spacing.SM))
     PodroidListRow(
         label = stringResource(R.string.verbose_avf_logging),
@@ -1102,6 +1164,8 @@ private fun UsbPassthroughRow(
     Text(
         text = if (available) {
             stringResource(R.string.usb_passthrough_settings_description_available)
+        } else if (activeBackendId == "uml") {
+            stringResource(R.string.usb_not_available_on_uml)
         } else {
             stringResource(R.string.usb_passthrough_settings_description_unavailable, activeBackendId)
         },
@@ -1124,6 +1188,7 @@ private fun AdvancedFieldsBlock(
     onQemuReset: () -> Unit,
     onKernelReset: () -> Unit,
     enabled: Boolean,
+    umlActive: Boolean,
 ) {
     Column(
         verticalArrangement = Arrangement.spacedBy(PodroidTokens.Spacing.MD),
@@ -1140,7 +1205,7 @@ private fun AdvancedFieldsBlock(
             )
         }
         AdvancedTextSetting(
-            label = stringResource(R.string.extra_qemu_args),
+            label = stringResource(if (umlActive) R.string.qemu_extra_args_qemu_only else R.string.extra_qemu_args),
             helper = stringResource(R.string.qemu_args_helper),
             value = qemuExtraArgs,
             enabled = enabled,
