@@ -12,6 +12,7 @@ import com.excp.podroid.data.repository.UpdateRepository
 import com.excp.podroid.engine.EngineHolder
 import com.excp.podroid.engine.VmState
 import com.excp.podroid.service.PodroidService
+import com.excp.podroid.ui.components.OwnUpdateGate
 import com.excp.podroid.ui.components.UpdateUiState
 import com.excp.podroid.util.NetworkUtils
 import com.excp.podroid.util.UptimeFormatter
