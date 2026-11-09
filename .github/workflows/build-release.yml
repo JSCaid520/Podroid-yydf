@@ -104,6 +104,21 @@ jobs:
           unzip -o -j /tmp/payload.apk 'lib/arm64-v8a/*' -d app/src/main/jniLibs/arm64-v8a
           unzip -o -j /tmp/payload.apk 'assets/vmlinuz-virt' 'assets/initrd.img' 'assets/alpine-rootfs.squashfs' -d app/src/main/assets
           echo "PAYLOAD_TAG_USED=${TAG}" >> "$GITHUB_ENV"
+          # GPL compliance: the UML backend runs a Linux kernel, and upstream
+          # publishes the corresponding source next to the APK. Take the same
+          # archive from the same release so our build ships the exact source
+          # it was built from, instead of pointing at a repo that moves.
+          SRC_URL=$(printf '%s' "$REL" | python3 -c "import json,sys; d=json.load(sys.stdin); print(next((a['browser_download_url'] for a in d['assets'] if a['name'].startswith('uml-source-')), ''))")
+          if [ -n "$SRC_URL" ]; then
+            SRC_FILE="/tmp/$(basename "$SRC_URL")"
+            curl -sSL --retry 4 --retry-delay 5 -o "$SRC_FILE" "$SRC_URL"
+            SRC_SHA=$(sha256sum "$SRC_FILE" | cut -d' ' -f1)
+            echo "UML_SOURCE_FILE=$SRC_FILE" >> "$GITHUB_ENV"
+            echo "UML_SOURCE_SHA256=$SRC_SHA" >> "$GITHUB_ENV"
+            echo "uml source: $(basename "$SRC_FILE") ($(stat -c %s "$SRC_FILE") B, sha256 $SRC_SHA)" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "uml source: upstream release ${TAG} carries no uml-source-* asset (skipped)" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
           ls -l app/src/main/jniLibs/arm64-v8a
           ls -l app/src/main/assets/vmlinuz-virt app/src/main/assets/initrd.img app/src/main/assets/alpine-rootfs.squashfs
           # Hard stop if a payload file is missing: shipping an APK without the
@@ -221,6 +236,10 @@ jobs:
           set -euo pipefail
           TAG="${{ steps.ver.outputs.tag }}"
           NAME="${{ steps.apk.outputs.name }}"
+          SOURCE_NOTE=""
+          if [ -n "${UML_SOURCE_FILE:-}" ] && [ -s "${UML_SOURCE_FILE}" ]; then
+            SOURCE_NOTE="- UML backend source (GPL-2.0 Linux kernel, from upstream ${PAYLOAD_TAG_USED}): $(basename "$UML_SOURCE_FILE"), sha256:${UML_SOURCE_SHA256}"
+          fi
           cat > /tmp/notes.md <<EOF
           Podroid fork build ${TAG}
 
@@ -229,6 +248,7 @@ jobs:
           - commit: ${GITHUB_SHA}
           - VM payload taken from upstream release: ${PAYLOAD_TAG_USED}
           - sha256: ${{ steps.apk.outputs.sha256 }}
+          ${SOURCE_NOTE}
 
           Local changes on top of upstream:
           - status bubble (SYSTEM_ALERT_WINDOW) with start/stop, forward replay,
@@ -236,7 +256,15 @@ jobs:
           - the VM now survives swiping the app out of recents, and an unexpected
             exit is retried up to 3 times
           EOF
-          gh release create "$TAG" "/tmp/$NAME" \
+          # Attach the UML kernel source next to the APK when we have it: the
+          # binary payload contains GPL-2.0 code, so the corresponding source
+          # must travel with the build.
+          ASSETS=("/tmp/$NAME")
+          if [ -n "${UML_SOURCE_FILE:-}" ] && [ -s "${UML_SOURCE_FILE}" ]; then
+            ASSETS+=("${UML_SOURCE_FILE}")
+          fi
+          printf 'attaching: %s\n' "${ASSETS[@]}"
+          gh release create "$TAG" "${ASSETS[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
             --notes-file /tmp/notes.md
