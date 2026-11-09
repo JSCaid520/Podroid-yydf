@@ -5,17 +5,20 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.excp.podroid.BuildConfig
 import com.excp.podroid.R
+import com.excp.podroid.data.repository.ApkRelease
 import com.excp.podroid.data.repository.PortForwardRepository
 import com.excp.podroid.data.repository.SettingsRepository
-import com.excp.podroid.data.repository.UpdateInfo
 import com.excp.podroid.data.repository.UpdateRepository
 import com.excp.podroid.engine.EngineHolder
 import com.excp.podroid.engine.VmState
 import com.excp.podroid.service.PodroidService
+import com.excp.podroid.ui.components.UpdateUiState
 import com.excp.podroid.util.NetworkUtils
 import com.excp.podroid.util.UptimeFormatter
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -31,6 +34,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
 import javax.inject.Inject
 
 /**
@@ -124,8 +128,16 @@ class HomeViewModel @Inject constructor(
     /** Phone IPv4 — cheap, lazily recomputed when the screen reads it. */
     fun phoneIp(): String = NetworkUtils.localIpv4(context)
 
-    private val _updateInfo = MutableStateFlow<UpdateInfo?>(null)
-    val updateInfo: StateFlow<UpdateInfo?> = _updateInfo.asStateFlow()
+    // ── In-app update from OUR OWN releases ─────────────────────────────────
+    // The upstream silent prompt is gone on purpose: it asked ExTV/Podroid for
+    // its latest release, so every user of this build got offered a version
+    // they cannot install over ours. This one asks our fork and only speaks up
+    // when something newer actually exists.
+    private val _ownUpdate = MutableStateFlow<UpdateUiState>(UpdateUiState.Idle)
+    /** Drives the launch-time update prompt (see the shared dialog in ui/components). */
+    val ownUpdate: StateFlow<UpdateUiState> = _ownUpdate.asStateFlow()
+
+    private var ownUpdateJob: Job? = null
 
     /**
      * True when AVF (pKVM) is present on this device but neither
@@ -199,7 +211,7 @@ class HomeViewModel @Inject constructor(
     }
 
     init {
-        checkForUpdate()
+        checkOwnUpdateOnLaunch()
     }
 
     /** Format "Up Xm Ys" / "Up Xh Ym" from the engine's →Running timestamp. */
@@ -209,25 +221,56 @@ class HomeViewModel @Inject constructor(
         return context.getString(R.string.up) + " " + UptimeFormatter.format(context, totalSec)
     }
 
-    private fun checkForUpdate() {
-        viewModelScope.launch {
-            try {
-                val info = updateRepository.checkForUpdate(BuildConfig.VERSION_NAME) ?: return@launch
-                if (!updateRepository.isDismissed(info.latestVersion)) {
-                    _updateInfo.value = info
-                }
-            } catch (c: kotlinx.coroutines.CancellationException) {
+    /**
+     * Launch-time check, once per process.
+     *
+     * Silent on "nothing new": the prompt exists for real updates only. Any
+     * failure (offline, rate limit, JSON change) is swallowed — a startup
+     * check must never surface an error the user didn't ask for; the manual
+     * button in Settings is the path that reports failures.
+     */
+    private fun checkOwnUpdateOnLaunch() {
+        if (OwnUpdateGate.checked) return
+        OwnUpdateGate.checked = true
+        ownUpdateJob?.cancel()
+        ownUpdateJob = viewModelScope.launch {
+            val release = try {
+                updateRepository.checkOwnRelease(BuildConfig.VERSION_NAME)
+            } catch (c: CancellationException) {
                 throw c
             } catch (e: Exception) {
-                android.util.Log.w("HomeViewModel", "update check failed", e)
+                android.util.Log.w("HomeViewModel", "own update check failed", e)
+                null
+            }
+            if (release != null) _ownUpdate.value = UpdateUiState.Available(release)
+        }
+    }
+
+    fun downloadOwnUpdate(release: ApkRelease) {
+        if (_ownUpdate.value is UpdateUiState.Downloading) return
+        ownUpdateJob?.cancel()
+        _ownUpdate.value = UpdateUiState.Downloading(0, release)
+        ownUpdateJob = viewModelScope.launch {
+            try {
+                val apk: File = updateRepository.downloadApk(release) { percent ->
+                    _ownUpdate.value = UpdateUiState.Downloading(percent, release)
+                }
+                _ownUpdate.value = UpdateUiState.Ready(apk, release)
+            } catch (c: CancellationException) {
+                throw c
+            } catch (e: Exception) {
+                android.util.Log.w("HomeViewModel", "own update download failed", e)
+                _ownUpdate.value = UpdateUiState.Failed(
+                    e.message ?: context.getString(R.string.unknown_error),
+                )
             }
         }
     }
 
-    fun dismissUpdate() {
-        val version = _updateInfo.value?.latestVersion ?: return
-        _updateInfo.value = null
-        viewModelScope.launch { updateRepository.dismissUpdate(version) }
+    /** Idles the dialog. Refuses mid-download: the dialog is the only progress UI. */
+    fun clearOwnUpdateState() {
+        if (_ownUpdate.value is UpdateUiState.Downloading) return
+        _ownUpdate.value = UpdateUiState.Idle
     }
 
     fun dismissAvfHint() {

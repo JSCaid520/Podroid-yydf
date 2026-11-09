@@ -2,8 +2,6 @@ package com.excp.podroid.ui.screens.home
 
 import android.Manifest
 import android.app.Activity
-import android.content.Intent
-import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts.RequestPermission
 import androidx.compose.animation.AnimatedContent
@@ -22,8 +20,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MonitorHeart
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.SystemUpdate
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -62,6 +58,7 @@ import com.excp.podroid.engine.VmState
 import com.excp.podroid.engine.avf.AvfFailureGuidance
 import com.excp.podroid.service.PodroidService
 import com.excp.podroid.ui.components.AdaptiveContainer
+import com.excp.podroid.ui.components.OwnUpdateDialogs
 import com.excp.podroid.ui.components.PermissionRows
 import com.excp.podroid.ui.components.PodroidDestructiveButton
 import com.excp.podroid.ui.components.PodroidGhostButton
@@ -94,7 +91,7 @@ fun HomeScreen(
     val context = LocalContext.current
     val vmState by viewModel.vmState.collectAsStateWithLifecycle()
     val bootStage by viewModel.bootStage.collectAsStateWithLifecycle()
-    val updateInfo by viewModel.updateInfo.collectAsStateWithLifecycle()
+    val ownUpdate by viewModel.ownUpdate.collectAsStateWithLifecycle()
     val meta by viewModel.meta.collectAsStateWithLifecycle()
     val uptimeTick by viewModel.uptimeTicker.collectAsStateWithLifecycle()
     val showAvfHint by viewModel.showAvfHint.collectAsStateWithLifecycle()
@@ -158,34 +155,21 @@ fun HomeScreen(
         }
     }
 
-    updateInfo?.let { info ->
-        AlertDialog(
-            onDismissRequest = { viewModel.dismissUpdate() },
-            icon  = { Icon(Icons.Default.SystemUpdate, contentDescription = stringResource(R.string.update_available)) },
-            title = { Text(stringResource(R.string.update_available)) },
-            text  = { Text(stringResource(R.string.version_available, info.latestVersion, BuildConfig.VERSION_NAME)) },
-            confirmButton = {
-                TextButton(onClick = {
-                    // Guard against ActivityNotFoundException (no browser) or a
-                    // blank/malformed releaseUrl from the remote JSON source.
-                    // Surface a toast on failure so the tap isn't a silent no-op.
-                    runCatching {
-                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(info.releaseUrl)))
-                    }.onFailure {
-                        android.widget.Toast.makeText(
-                            context,
-                            context.getString(R.string.update_open_failed),
-                            android.widget.Toast.LENGTH_LONG,
-                        ).show()
-                    }
-                    viewModel.dismissUpdate()
-                }) { Text(stringResource(R.string.download)) }
-            },
-            dismissButton = {
-                TextButton(onClick = { viewModel.dismissUpdate() }) { Text(stringResource(R.string.later)) }
-            },
-        )
-    }
+    // Launch-time prompt for a newer build of our own fork. Download/install
+    // progress is shared with Settings, so both paths look and behave the same.
+    OwnUpdateDialogs(
+        state = ownUpdate,
+        onDismiss = viewModel::clearOwnUpdateState,
+        onDownload = viewModel::downloadOwnUpdate,
+        onInstalled = viewModel::clearOwnUpdateState,
+        onInstallBlocked = {
+            android.widget.Toast.makeText(
+                context,
+                context.getString(R.string.update_install_permission_needed),
+                android.widget.Toast.LENGTH_LONG,
+            ).show()
+        },
+    )
 
     Scaffold(
         topBar = {

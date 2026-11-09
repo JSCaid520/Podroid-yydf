@@ -34,7 +34,6 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -85,6 +84,7 @@ import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.withContext
 import com.excp.podroid.ui.components.AdaptiveContainer
+import com.excp.podroid.ui.components.OwnUpdateDialogs
 import com.excp.podroid.ui.components.PodroidDestructiveButton
 import com.excp.podroid.ui.components.PodroidGhostButton
 import com.excp.podroid.ui.components.PodroidInlineAction
@@ -92,6 +92,7 @@ import com.excp.podroid.ui.components.PodroidListRow
 import com.excp.podroid.ui.components.VmBandwidthChips
 import com.excp.podroid.ui.components.VmCpuChips
 import com.excp.podroid.ui.components.VmRamChips
+import com.excp.podroid.ui.components.UpdateUiState
 import com.excp.podroid.ui.components.VmStorageChips
 import com.excp.podroid.ui.components.PodroidChipColors
 import com.excp.podroid.ui.components.PodroidSectionLabel
@@ -99,8 +100,6 @@ import com.excp.podroid.ui.components.PodroidSwitch
 import com.excp.podroid.ui.components.PodroidTopBar
 import com.excp.podroid.ui.theme.PodroidTokens
 import com.excp.podroid.data.repository.LanguageManager
-import com.excp.podroid.util.ApkInstaller
-import java.util.Locale
 
 @Composable
 private fun languageDisplayName(language: String, systemDefaultLanguage: String): String {
@@ -518,101 +517,22 @@ fun SettingsScreen(
         )
     }
 
-    // One dialog driven by the updater state machine. Downloading deliberately
-    // cannot be dismissed: the transfer runs in viewModelScope, so closing the
-    // dialog would leave the user with no progress feedback at all.
-    when (val update = updateState) {
-        is UpdateUiState.Available -> AlertDialog(
-            onDismissRequest = viewModel::clearUpdateState,
-            title = { Text(stringResource(R.string.update_available_title, update.release.version)) },
-            text = {
-                Text(
-                    stringResource(
-                        R.string.update_available_body,
-                        BuildConfig.VERSION_NAME,
-                        formatDownloadSize(update.release.sizeBytes),
-                    ),
+    // One dialog driven by the updater state machine (shared with the Home
+    // launch prompt so both entry points behave identically).
+    OwnUpdateDialogs(
+        state = updateState,
+        onDismiss = viewModel::clearUpdateState,
+        onDownload = viewModel::downloadUpdate,
+        onInstalled = viewModel::clearUpdateState,
+        onInstallBlocked = {
+            avfScope.launch {
+                snackbarHostState.showSnackbar(
+                    ctx.getString(R.string.update_install_permission_needed),
                 )
-            },
-            confirmButton = {
-                TextButton(onClick = { viewModel.downloadUpdate(update.release) }) {
-                    Text(stringResource(R.string.update_download))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = viewModel::clearUpdateState) {
-                    Text(stringResource(R.string.cancel))
-                }
-            },
-        )
-
-        is UpdateUiState.Downloading -> AlertDialog(
-            onDismissRequest = {},
-            title = { Text(stringResource(R.string.update_downloading_title)) },
-            text = {
-                Column {
-                    LinearProgressIndicator(
-                        progress = { update.percent / 100f },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Spacer(Modifier.height(PodroidTokens.Spacing.SM))
-                    Text(
-                        text = stringResource(R.string.update_downloading, update.percent),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            },
-            confirmButton = {},
-        )
-
-        is UpdateUiState.Ready -> AlertDialog(
-            onDismissRequest = viewModel::clearUpdateState,
-            title = { Text(stringResource(R.string.update_ready_title)) },
-            text = { Text(stringResource(R.string.update_ready_body, update.release.version)) },
-            confirmButton = {
-                TextButton(onClick = {
-                    val started = ApkInstaller.install(ctx, update.apk)
-                    viewModel.clearUpdateState()
-                    if (!started) {
-                        // The system's "install unknown apps" screen was opened
-                        // instead; the APK stays on disk, so a retry needs no
-                        // re-download.
-                        avfScope.launch {
-                            snackbarHostState.showSnackbar(
-                                ctx.getString(R.string.update_install_permission_needed),
-                            )
-                        }
-                    }
-                }) {
-                    Text(stringResource(R.string.update_install))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = viewModel::clearUpdateState) {
-                    Text(stringResource(R.string.update_later))
-                }
-            },
-        )
-
-        is UpdateUiState.Failed -> AlertDialog(
-            onDismissRequest = viewModel::clearUpdateState,
-            title = { Text(stringResource(R.string.update_failed_title)) },
-            text = { Text(stringResource(R.string.update_failed_body, update.message)) },
-            confirmButton = {
-                TextButton(onClick = viewModel::clearUpdateState) {
-                    Text(stringResource(R.string.close))
-                }
-            },
-        )
-
-        else -> Unit
-    }
+            }
+        },
+    )
 }
-
-/** Renders the release asset size for the download prompt; 0 = GitHub omitted it. */
-private fun formatDownloadSize(bytes: Long): String =
-    if (bytes <= 0L) "—" else String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
 
 @Composable
 private fun AppearanceSection(

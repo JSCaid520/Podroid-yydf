@@ -1,25 +1,14 @@
 package com.excp.podroid.data.repository
 
 import android.content.Context
-import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.emptyPreferences
-import androidx.datastore.preferences.core.longPreferencesKey
-import androidx.datastore.preferences.core.stringPreferencesKey
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 import java.net.URL
 import javax.inject.Inject
 import javax.inject.Singleton
-
-data class UpdateInfo(
-    val latestVersion: String,
-    val releaseUrl: String,
-)
 
 /**
  * A published APK of *our* fork, already resolved to a single download URL.
@@ -165,99 +154,11 @@ internal fun isNewerOwn(latest: String, current: String): Boolean {
 class UpdateRepository @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
-    private val dismissedKey = stringPreferencesKey("dismissed_update_version")
-    private val lastCheckKey = longPreferencesKey("update_check_timestamp")
-    private val cacheValidityMs = 24 * 60 * 60 * 1000L
-    // A transient (IOException) failure backs off only this long instead of the
-    // full cacheValidityMs, so a single offline launch doesn't suppress the next
-    // in-app update check for a full day.
-    private val retryFloorMs = 20 * 60 * 1000L
-
-    suspend fun checkForUpdate(currentVersion: String): UpdateInfo? = withContext(Dispatchers.IO) {
-        // Wall-clock time so the 24h gate survives device reboots and deep sleep.
-        val now = System.currentTimeMillis()
-        var connection: java.net.HttpURLConnection? = null
-        try {
-            val lastCheck = context.dataStore.data
-                .catch { e -> if (e is java.io.IOException) emit(emptyPreferences()) else throw e }
-                .first()[lastCheckKey] ?: 0L
-
-            if (!shouldCheck(now, lastCheck, cacheValidityMs)) {
-                return@withContext null
-            }
-
-            connection = URL("https://api.github.com/repos/ExTV/Podroid/releases/latest")
-                .openConnection() as java.net.HttpURLConnection
-            connection.connectTimeout = 5000
-            connection.readTimeout = 5000
-            connection.setRequestProperty("Accept", "application/vnd.github+json")
-
-            val code = connection.responseCode
-            if (code !in 200..299) {
-                // Consume error body so the connection can be reused, then back off.
-                runCatching { connection.errorStream?.bufferedReader()?.use { it.readText() } }
-                context.dataStore.edit { it[lastCheckKey] = now }
-                return@withContext null
-            }
-
-            val json = connection.inputStream.bufferedReader().use { it.readText() }
-            val obj = JSONObject(json)
-            // removePrefix rather than trimStart — trimStart strips repeated 'v' chars.
-            val tag = obj.optString("tag_name", "").removePrefix("v")
-            val url = obj.optString("html_url", "")
-
-            if (tag.isEmpty() || url.isEmpty()) {
-                context.dataStore.edit { it[lastCheckKey] = now }
-                return@withContext null
-            }
-
-            context.dataStore.edit { it[lastCheckKey] = now }
-
-            // Build-type suffix (`-debug`) is decoration, not a prerelease — strip it so
-            // 1.1.7-debug compares equal to the 1.1.7 release tag instead of "older".
-            val normalizedCurrent = currentVersion.removeSuffix("-debug")
-            if (isNewer(tag, normalizedCurrent)) UpdateInfo(tag, url) else null
-        } catch (c: kotlinx.coroutines.CancellationException) {
-            // Coroutine cancellation is not a check failure — don't record a
-            // timestamp (which would back off a check the user may retry) and
-            // don't swallow it; let it propagate.
-            throw c
-        } catch (e: Exception) {
-            // Network/DataStore/JSON error: log it (a changed GitHub response or
-            // JSON shape was previously failing invisibly) and record a timestamp
-            // to back off on the next launch. A transient network failure
-            // (offline / DNS / timeout — all IOException) only earns the short
-            // retry floor; a non-IO error means GitHub was reached but returned
-            // something unusable, so it keeps the full 24h backoff.
-            android.util.Log.w("UpdateRepository", "update check failed", e)
-            val stamp = backoffStamp(now, transient = e is java.io.IOException, cacheValidityMs, retryFloorMs)
-            runCatching { context.dataStore.edit { it[lastCheckKey] = stamp } }
-            null
-        } finally {
-            connection?.disconnect()
-        }
-    }
-
-    suspend fun isDismissed(version: String): Boolean {
-        // Shield the read so a corrupted store returns "not dismissed" instead of
-        // throwing into the caller.
-        val dismissed = context.dataStore.data
-            .catch { e -> if (e is java.io.IOException) emit(emptyPreferences()) else throw e }
-            .first()[dismissedKey]
-        return dismissed == version
-    }
-
-    suspend fun dismissUpdate(version: String) {
-        context.dataStore.edit { it[dismissedKey] = version }
-    }
-
     // ── In-app update from OUR OWN releases ──────────────────────────────────
-    // Kept strictly separate from [checkForUpdate]: that one asks upstream
-    // "is there a newer Podroid?" and only ever opens a browser. This one asks
-    // "is there a newer build of ours?" and is the only feed the installer may
-    // use. Pointing the silent startup check at our fork would nag every user
-    // of an upstream build, so this path is manual-only (Settings → Check for
-    // updates) and is not gated by the 24h cache.
+    // The single update feed this build knows about: Settings → "Check for
+    // updates" and the launch prompt on Home both go through here. There is no
+    // upstream feed any more — offering ExTV/Podroid releases to a user of this
+    // build only ever produced a version they cannot install over ours.
 
     private val ownReleaseApi = "https://api.github.com/repos/yydfys/Podroid/releases/latest"
 

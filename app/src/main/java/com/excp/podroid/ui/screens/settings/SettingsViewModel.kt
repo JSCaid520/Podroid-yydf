@@ -23,6 +23,7 @@ import com.excp.podroid.data.repository.PortForwardRule
 import com.excp.podroid.data.repository.SettingsRepository
 import com.excp.podroid.data.repository.UpdateRepository
 import com.excp.podroid.di.ApplicationScope
+import com.excp.podroid.ui.components.UpdateUiState
 import com.excp.podroid.engine.EngineHolder
 import com.excp.podroid.engine.EngineSelection
 import com.excp.podroid.engine.VmState
@@ -74,22 +75,6 @@ data class SettingsUiState(
     val bandwidthMbps: Int = 0,
     val overlayBubbleEnabled: Boolean = true,
 )
-
-/**
- * What the in-app updater is currently doing. One state, one dialog: the
- * Settings screen renders exactly one of these at a time, so a download can
- * never end up with two competing prompts.
- */
-sealed interface UpdateUiState {
-    data object Idle : UpdateUiState
-    data object Checking : UpdateUiState
-    /** Nothing newer published (also covers a failed check — see checkOwnUpdate). */
-    data object UpToDate : UpdateUiState
-    data class Available(val release: ApkRelease) : UpdateUiState
-    data class Downloading(val percent: Int, val release: ApkRelease) : UpdateUiState
-    data class Ready(val apk: File, val release: ApkRelease) : UpdateUiState
-    data class Failed(val message: String) : UpdateUiState
-}
 
 // Typed intermediates for the three sub-combines below, so a reordered flow
 // is a compile error instead of a silently cross-wired setting (the previous
