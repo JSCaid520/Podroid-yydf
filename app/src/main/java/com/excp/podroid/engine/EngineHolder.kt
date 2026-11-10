@@ -41,7 +41,7 @@ import com.excp.podroid.engine.uml.UmlProcessTree
 import com.excp.podroid.engine.uml.UmlInfo
 import com.excp.podroid.engine.uml.UmlStatus
 import com.excp.podroid.engine.uml.shouldPersistProbe
-import com.excp.podroid.engine.uml.umlDemotionReason
+import com.excp.podroid.engine.uml.umlDemotionReasonDetailed
 import com.excp.podroid.engine.uml.umlProbeKey
 import com.excp.podroid.engine.uml.umlInfo
 import com.excp.podroid.engine.uml.umlStatus
@@ -670,7 +670,7 @@ class EngineHolder @Inject constructor(
     ) {
         _overlay.value = VmState.Starting
         val next = try {
-            val reason = umlDemotionReason(outcome.exitCode, outcome.bootTimedOut, outcome.consoleTail)
+            val reason = umlDemotionReasonDetailed(outcome.exitCode, outcome.bootTimedOut, outcome.consoleTail)
             android.util.Log.w(TAG, "UML failed on this device ($reason); demoting and falling back")
             umlProbeStore.demote(UmlDemotion(currentUmlKey(), reason, System.currentTimeMillis()))
             if (!awaitUmlGone()) {

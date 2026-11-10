@@ -449,6 +449,8 @@ fun SettingsScreen(
                         onKernelReset = viewModel::resetKernelExtraCmdline,
                         enabled = vmNotRunning,
                         umlActive = activeBackendId == "uml",
+                        umlSeccomp = ui.umlSeccompEnabled,
+                        onUmlSeccompChange = viewModel::setUmlSeccomp,
                     )
                 }
 
@@ -1109,6 +1111,8 @@ private fun AdvancedFieldsBlock(
     onKernelReset: () -> Unit,
     enabled: Boolean,
     umlActive: Boolean,
+    umlSeccomp: Boolean,
+    onUmlSeccompChange: (Boolean) -> Unit,
 ) {
     Column(
         verticalArrangement = Arrangement.spacedBy(PodroidTokens.Spacing.MD),
@@ -1141,6 +1145,16 @@ private fun AdvancedFieldsBlock(
             onValueChange = onKernelChange,
             onReset = onKernelReset,
             minLines = 2,
+        )
+        // Only reachable on the UML backend (the flag is ignored by QEMU/AVF),
+        // but shown unconditionally so it can be set before switching, when the
+        // failing UML run that motivates it has already happened.
+        AdvancedSwitchSetting(
+            label = stringResource(R.string.uml_seccomp_label),
+            helper = stringResource(R.string.uml_seccomp_helper),
+            checked = umlSeccomp,
+            enabled = enabled,
+            onCheckedChange = onUmlSeccompChange,
         )
     }
 }
@@ -1236,6 +1250,40 @@ private fun AddPortForwardDialog(
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
         },
     )
+}
+
+/** Label + helper on the left, switch on the right; mirrors AdvancedTextSetting. */
+@Composable
+private fun AdvancedSwitchSetting(
+    label: String,
+    helper: String,
+    checked: Boolean,
+    enabled: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+            )
+            PodroidSwitch(
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+                enabled = enabled,
+            )
+        }
+        Text(
+            text = helper,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+    }
 }
 
 @Composable

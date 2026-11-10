@@ -97,7 +97,10 @@ class UmlProbe @Inject constructor(
             bandwidthMbps = settingsRepository.getBandwidthMbpsSnapshot(),
         )
         val cmd = UmlCommandBuilder.build(
-            UmlLaunchParams(lib, filesDir, pageSize, config, emptyList(), downloadsPath = null, probe = true),
+            UmlLaunchParams(
+                lib, filesDir, pageSize, config, emptyList(), downloadsPath = null, probe = true,
+                seccomp = settingsRepository.getUmlSeccompSnapshot(),
+            ),
         )
         Log.d(TAG, "Launching UML probe: ${cmd.argv}")
         val pb = ProcessBuilder(cmd.argv).directory(work)

@@ -436,4 +436,6 @@
     <string name="uml_reason_detail">Reason: %1$s</string>
     <string name="uml_diag_status">UML status: %1$s</string>
     <string name="uml_diag_status_reason">UML status: %1$s (%2$s)</string>
+    <string name="uml_seccomp_label">UML syscall sandbox (seccomp)</string>
+    <string name="uml_seccomp_helper">On by default. If a UML boot dies with "exit 159" (SIGSYS), turn this off to make UML use ptrace mode instead — slower, but it may get past the host\'s syscall filter. Stop the VM, change this, then retry UML.</string>
 </resources>

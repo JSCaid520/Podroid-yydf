@@ -66,6 +66,7 @@ data class SettingsUiState(
     val storageAccessEnabled: Boolean = false,
     val qemuExtraArgs: String = SettingsRepository.DEFAULT_QEMU_EXTRA_ARGS,
     val kernelExtraCmdline: String = SettingsRepository.DEFAULT_KERNEL_EXTRA_CMDLINE,
+    val umlSeccompEnabled: Boolean = true,
     val darkTheme: Boolean = false,
     val dynamicColorEnabled: Boolean = false,
     val engineSelection: EngineSelection = EngineSelection.AUTO,
@@ -93,6 +94,7 @@ private data class MiscRowsGroup(
     val kernelExtraCmdline: String,
     val darkTheme: Boolean,
     val dynamicColorEnabled: Boolean,
+    val umlSeccompEnabled: Boolean,
 )
 
 private data class LocaleRowsGroup(
@@ -131,10 +133,15 @@ class SettingsViewModel @Inject constructor(
             settingsRepository.storageAccessEnabled,
             settingsRepository.qemuExtraArgs,
             settingsRepository.kernelExtraCmdline,
-            settingsRepository.darkTheme,
-            settingsRepository.dynamicColorEnabled,
-        ) { storageAccess, qemu, kernel, dark, dyn ->
-            MiscRowsGroup(storageAccess, qemu, kernel, dark, dyn)
+            // Nested so the outer combine keeps its typed 5-argument form; a
+            // sixth top-level flow would force the untyped vararg overload.
+            combine(
+                settingsRepository.darkTheme,
+                settingsRepository.dynamicColorEnabled,
+                settingsRepository.umlSeccomp,
+            ) { dark, dyn, seccomp -> Triple(dark, dyn, seccomp) },
+        ) { storageAccess, qemu, kernel, look ->
+            MiscRowsGroup(storageAccess, qemu, kernel, look.first, look.second, look.third)
         },
         combine(
             settingsRepository.bandwidthMbps,
@@ -154,6 +161,7 @@ class SettingsViewModel @Inject constructor(
             storageAccessEnabled = misc.storageAccessEnabled,
             qemuExtraArgs = misc.qemuExtraArgs,
             kernelExtraCmdline = misc.kernelExtraCmdline,
+            umlSeccompEnabled = misc.umlSeccompEnabled,
             darkTheme = misc.darkTheme,
             dynamicColorEnabled = misc.dynamicColorEnabled,
             engineSelection = locale.engineSelection,
@@ -210,6 +218,10 @@ class SettingsViewModel @Inject constructor(
 
     fun setDynamicColorEnabled(value: Boolean) {
         viewModelScope.launch { settingsRepository.setDynamicColorEnabled(value) }
+    }
+
+    fun setUmlSeccomp(value: Boolean) {
+        viewModelScope.launch { settingsRepository.setUmlSeccomp(value) }
     }
 
     fun setEngineSelection(value: EngineSelection) {
@@ -555,6 +567,7 @@ class SettingsViewModel @Inject constructor(
             appendLine("Terminal font:      $font")
             appendLine("QEMU extra args:    $qemuExtras")
             appendLine("Kernel extra cmd:   $kernelExtras")
+            appendLine("UML seccomp:        ${if (settingsRepository.getUmlSeccompSnapshot()) "on" else "off (ptrace)"}")
             appendLine()
 
             appendLine("=== VM State ===")
@@ -595,6 +608,19 @@ class SettingsViewModel @Inject constructor(
 
             appendLine("=== App Logcat (this process) ===")
             append(captureAppLogcat())
+            appendLine()
+
+            // UML keeps its own console file because the QEMU fallback boot
+            // truncates console.log right after a UML failure.
+            appendLine("=== UML Console Log (last UML run) ===")
+            val umlConsoleFile = File(context.filesDir, "uml-console.log")
+            if (umlConsoleFile.exists() && umlConsoleFile.length() > 0) {
+                val text = umlConsoleFile.readText()
+                append(text)
+                if (!text.endsWith("\n")) appendLine()
+            } else {
+                appendLine("(no uml-console.log — UML has not run on this build)")
+            }
             appendLine()
 
             appendLine("=== VM Console Log (backend=${activeBackendId()}) ===")

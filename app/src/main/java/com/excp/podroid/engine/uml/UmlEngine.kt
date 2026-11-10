@@ -306,6 +306,7 @@ class UmlEngine @Inject constructor(
                     inlineRules = QemuEngine.inlineLaunchRules(portForwards),
                     downloadsPath = sharedDownloadsPath(config),
                     probe = false,
+                    seccomp = settingsRepository.getUmlSeccompSnapshot(),
                 ),
             )
             Log.d(TAG, "Launching UML with ${cmd.argv.size} args: ${cmd.argv}")
@@ -345,7 +346,7 @@ class UmlEngine @Inject constructor(
             }
 
             val monitor = QemuBootMonitor(
-                serialSockPath, File(filesDir, "console.log"),
+                serialSockPath, File(filesDir, CONSOLE_LOG),
                 detector, _consoleText, SOCKET_READY_TIMEOUT_MS,
             )
             bootMonitor = monitor
@@ -561,7 +562,7 @@ class UmlEngine @Inject constructor(
             appendLine("uml supervisor stderr (last ${tail.size} line(s)):")
             tail.forEach { appendLine("  $it") }
         }
-        val console = consoleTail(File(filesDir, "console.log"))
+        val console = consoleTail(File(filesDir, CONSOLE_LOG))
         if (console.isEmpty()) {
             appendLine("uml console: (none captured)")
         } else {
@@ -625,6 +626,13 @@ class UmlEngine @Inject constructor(
         /** Above the supervisor's own 60 s graceful window, so it normally wins. */
         private const val STOP_GRACE_S = 65L
         private const val TREE_SWEEP_MS = 3_000L
+
+        /**
+         * UML writes its console here, NOT to console.log: a UML failure is
+         * followed immediately by a QEMU fallback boot that truncates
+         * console.log, which used to erase the only evidence of why UML died.
+         */
+        const val CONSOLE_LOG = "uml-console.log"
 
         fun signalName(sig: Int): String = when (sig) {
             4 -> "SIGILL"

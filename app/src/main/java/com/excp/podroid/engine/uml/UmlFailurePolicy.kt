@@ -39,12 +39,31 @@ fun classifyUmlExit(
     else -> UmlExitClass.DEMOTE
 }
 
-/** Short, untranslated cause stored with a demotion and shown in Diagnostics. */
+/** Short, untranslated cause; the form callers use for control flow. */
 fun umlDemotionReason(exitCode: Int?, bootTimedOut: Boolean, consoleTail: String): String =
     when {
         bootTimedOut -> "boot timeout"
         else -> fatalSignature(consoleTail) ?: "exit ${exitCode ?: "unknown"}"
     }
+
+/**
+ * [umlDemotionReason] plus the last console line, for the demotion record that
+ * Settings and Diagnostics show.
+ *
+ * The bare exit code ("exit 159") says nothing about *where* the run died; the
+ * last console line usually names the stage or syscall that killed the kernel
+ * process. Kept to one line because Settings renders it as a single label, and
+ * deliberately separate from [umlDemotionReason] so the router-died check in
+ * UmlEngine.formatExitError keeps comparing against the raw reason.
+ */
+fun umlDemotionReasonDetailed(exitCode: Int?, bootTimedOut: Boolean, consoleTail: String): String {
+    val base = umlDemotionReason(exitCode, bootTimedOut, consoleTail)
+    val last = consoleTail.lineSequence().map { it.trim() }.lastOrNull { it.isNotEmpty() }
+        ?: return base
+    if (last in base) return base
+    val hint = if (last.length > 160) last.take(157) + "..." else last
+    return "$base: $hint"
+}
 
 /**
  * A "busy" probe means UML processes already existed, so it never ran: it

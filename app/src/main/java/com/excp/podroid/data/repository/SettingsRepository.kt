@@ -65,6 +65,7 @@ class SettingsRepository @Inject constructor(
         val KEY_LAST_CONTAINER_COUNT   = intPreferencesKey("last_container_count")
         val KEY_ENGINE_SELECTION       = stringPreferencesKey("engine_selection")
         val KEY_AVF_HINT_DISMISSED      = booleanPreferencesKey("avf_hint_dismissed")
+        val KEY_UML_SECCOMP            = booleanPreferencesKey("uml_seccomp")
         val KEY_AVF_VERBOSE_LOGGING     = booleanPreferencesKey("avf_verbose_logging")
         // Per-device AVF vCPU cap discovered at runtime: on Tensor G3/G4 the
         // MATCH_HOST topology resets the guest in early boot above a certain core
@@ -177,6 +178,9 @@ class SettingsRepository @Inject constructor(
     // of throwing into LanguageManager's locale collector.
     val language: Flow<String> = pref(KEY_LANGUAGE, "auto")
     val avfHintDismissed     = pref(KEY_AVF_HINT_DISMISSED, false)
+    /** UML's own syscall sandbox. Off = ptrace mode: slower, but survives
+     *  devices whose seccomp policy kills the seccomp-based mode (SIGSYS). */
+    val umlSeccomp           = pref(KEY_UML_SECCOMP, true)
     val avfCpuCap            = pref(KEY_AVF_CPU_CAP, 0)
     val usbPassthroughEnabled = pref(KEY_USB_PASSTHROUGH_ENABLED, false)
     val loadBalanceEnabled    = pref(KEY_LOAD_BALANCE_ENABLED, false)
@@ -226,6 +230,7 @@ class SettingsRepository @Inject constructor(
     suspend fun setLanguage(value: String)               = set(KEY_LANGUAGE, value)
     suspend fun setEngineSelection(value: EngineSelection) = set(KEY_ENGINE_SELECTION, value.name)
     suspend fun setAvfHintDismissed(value: Boolean)      = set(KEY_AVF_HINT_DISMISSED, value)
+    suspend fun setUmlSeccomp(value: Boolean)            = set(KEY_UML_SECCOMP, value)
     suspend fun setAvfVerboseLogging(value: Boolean)     = set(KEY_AVF_VERBOSE_LOGGING, value)
     suspend fun setAvfCpuCap(value: Int)                 = set(KEY_AVF_CPU_CAP, value)
     suspend fun setUsbPassthroughEnabled(value: Boolean) = set(KEY_USB_PASSTHROUGH_ENABLED, value)
@@ -308,6 +313,7 @@ class SettingsRepository @Inject constructor(
     suspend fun getTerminalFontSnapshot()         = terminalFont.first()
     suspend fun getQemuExtraArgsSnapshot()        = qemuExtraArgs.first()
     suspend fun getKernelExtraCmdlineSnapshot()   = kernelExtraCmdline.first()
+    suspend fun getUmlSeccompSnapshot()           = umlSeccomp.first()
     suspend fun getEngineSelectionSnapshot()      = engineSelection.first()
     suspend fun getAvfVerboseLoggingSnapshot()    = avfVerboseLogging.first()
     suspend fun getAvfCpuCapSnapshot()            = avfCpuCap.first()

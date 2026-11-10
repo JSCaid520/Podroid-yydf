@@ -437,4 +437,6 @@
     <string name="uml_reason_detail">原因：%1$s</string>
     <string name="uml_diag_status">UML 状态：%1$s</string>
     <string name="uml_diag_status_reason">UML 状态：%1$s（%2$s）</string>
+    <string name="uml_seccomp_label">UML 系统调用沙箱（seccomp）</string>
+    <string name="uml_seccomp_helper">默认开启。若 UML 启动报「exit 159」（SIGSYS），可关掉改为 ptrace 模式——更慢，但可能绕过系统的系统调用过滤。请先停虚拟机，改完再重试 UML。</string>
 </resources>
